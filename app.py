@@ -502,6 +502,6 @@ st.markdown("---")
 st.markdown("""
 <div style="text-align: center; color: #666;">
     特許PDF構造化ツール - マルチモーダル生成AIを使用して特許文書から構造化情報を抽出します<br>
-    <small>Powered by patent-extractor library</small>
+    <small>Powered by patent-extractor library Copyright (c) 2025 Pyxist Co.,Ltd</small>
 </div>
 """, unsafe_allow_html=True)
