@@ -2,7 +2,6 @@
 
 特許PDFからマルチモーダル生成AI（Gemini、GPT、Claude）を使用して構造化JSONを抽出するStreamlitウェブアプリケーションです。
 
-![App Screenshot](https://via.placeholder.com/800x400?text=Patent+PDF+Extractor+App)
 
 ## 🚀 機能
 
@@ -18,7 +17,7 @@
 ## 🎥 デモ
 
 ### ライブデモ
-[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://your-streamlit-app-url.streamlit.app)
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://patent-json.streamlit.app/)
 
 ### 使用例
 
@@ -103,9 +102,8 @@ maxUploadSize = 50
 ## 📚 サポートされるAIモデル
 
 ### Google Gemini
-- `gemini-1.5-pro` - 高性能モデル
-- `gemini-1.5-flash` - 高速モデル  
-- `gemini-2.0-flash-exp` - 実験的最新モデル
+- `gemini-2.5-pro` - 高性能モデル
+- `gemini-2.5-flash` - 高速モデル  
 
 ### OpenAI
 - `gpt-4o` - 最新マルチモーダルモデル
@@ -195,4 +193,5 @@ MIT License - 詳細は [LICENSE](LICENSE) ファイルを参照
 
 ---
 
-⭐ このプロジェクトが役に立ったら、スターをつけていただけると嬉しいです！
+⭐ このプロジェクトが役に立ったら、スターをつけていただけると嬉しいです。
+Copyright © 2025 Pyxist Co.,Ltd
