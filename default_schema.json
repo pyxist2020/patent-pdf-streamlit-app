@@ -1,0 +1,938 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PatentDocumentSchema",
+  "description": "Schema for structuring patent PDF content with detailed chemical structure support",
+  "type": "object",
+  "required": [
+    "FrontPage",
+    "Claims",
+    "Description",
+    "publicationIdentifier"
+  ],
+  "properties": {
+    "publicationIdentifier": {
+      "type": "string",
+      "description": "Unique identifier for the patent publication (e.g., WO2020162638A1)"
+    },
+    "FrontPage": {
+      "type": "object",
+      "title": "FrontPageType",
+      "description": "Front page information of the patent document",
+      "required": [
+        "PublicationData",
+        "ApplicationData",
+        "Inventors",
+        "Applicants",
+        "ClassificationData",
+        "Abstract"
+      ],
+      "properties": {
+        "PublicationData": {
+          "type": "object",
+          "title": "PublicationDataType",
+          "description": "Publication details",
+          "required": [
+            "PublicationNumber",
+            "PublicationKind",
+            "PublicationDate",
+            "PatentOffice"
+          ],
+          "properties": {
+            "PublicationNumber": { "type": "string" },
+            "PublicationKind": { "type": "string" },
+            "PublicationDate": { "type": "string", "format": "date" },
+            "PatentOffice": { "type": "string" }
+          }
+        },
+        "ApplicationData": {
+          "type": "object",
+          "title": "ApplicationDataType",
+          "description": "Application details",
+          "required": [
+            "ApplicationNumber",
+            "InternationalApplicationNumber",
+            "InternationalApplicationDate"
+          ],
+          "properties": {
+            "ApplicationNumber": { "type": "string" },
+            "InternationalApplicationNumber": { "type": "string" },
+            "InternationalApplicationDate": { "type": "string", "format": "date" },
+            "PriorityData": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "title": "PriorityDataType",
+                "description": "Priority claim details",
+                "required": [
+                  "PriorityNumber",
+                  "PriorityDate",
+                  "PriorityCountry"
+                ],
+                "properties": {
+                  "PriorityNumber": { "type": "string" },
+                  "PriorityDate": { "type": "string", "format": "date" },
+                  "PriorityCountry": { "type": "string" }
+                }
+              },
+              "minItems": 0
+            }
+          }
+        },
+        "Inventors": {
+          "type": "object",
+          "title": "InventorsType",
+          "properties": {
+            "Inventor": {
+              "type": "array",
+              "items": { "$ref": "#/definitions/PersonType" }
+            }
+          }
+        },
+        "Applicants": {
+          "type": "object",
+          "title": "ApplicantsType",
+          "properties": {
+            "Applicant": {
+              "type": "array",
+              "items": { "$ref": "#/definitions/OrganizationType" }
+            }
+          }
+        },
+        "Agents": {
+          "type": "object",
+          "title": "AgentsType",
+          "properties": {
+            "Agent": {
+              "type": "array",
+              "items": { "$ref": "#/definitions/PersonType" }
+            }
+          },
+          "minProperties": 0
+        },
+        "ClassificationData": {
+          "type": "object",
+          "title": "ClassificationDataType",
+          "properties": {
+            "IntCl": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "title": "IntClType",
+                "required": [ "Class" ],
+                "properties": {
+                  "Class": { "type": "string" },
+                  "Version": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "Abstract": {
+          "type": "object",
+          "title": "AbstractType",
+          "properties": {
+            "Paragraph": {
+              "type": "array",
+              "items": { "$ref": "#/definitions/ParagraphType" }
+            },
+            "ChemicalStructure": {
+              "type": "array",
+              "items": { "$ref": "#/definitions/ChemicalStructureType" }
+            }
+          }
+        }
+      }
+    },
+    "Claims": {
+      "type": "object",
+      "title": "ClaimsType",
+      "properties": {
+        "Claim": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/ClaimType" }
+        }
+      }
+    },
+    "Description": {
+      "type": "object",
+      "title": "DescriptionType",
+      "properties": {
+        "TechnicalField": { "$ref": "#/definitions/SectionType" },
+        "BackgroundArt": { "$ref": "#/definitions/SectionType" },
+        "SummaryOfInvention": {
+          "type": "object",
+          "title": "SummaryOfInventionType",
+          "properties": {
+            "ProblemToSolve": { "$ref": "#/definitions/SectionType" },
+            "MeansForSolvingProblem": { "$ref": "#/definitions/SectionType" },
+            "EffectsOfInvention": { "$ref": "#/definitions/SectionType" }
+          }
+        },
+        "DetailedDescriptionOfInvention": { "$ref": "#/definitions/SectionType" },
+        "Examples": { "$ref": "#/definitions/ExamplesType" }
+      }
+    },
+    "ChemicalStructureLibrary": {
+      "type": "object",
+      "title": "ChemicalStructureLibraryType",
+      "description": "Centralized repository of all chemical structures in the patent",
+      "properties": {
+        "Compound": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/PatentChemicalCompoundType" }
+        }
+      }
+    },
+    "BiologicalSequenceLibrary": {
+      "type": "object",
+      "title": "BiologicalSequenceLibraryType", 
+      "description": "Centralized repository of all biological sequences in the patent",
+      "properties": {
+        "ProteinSequence": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/ProteinSequenceType" }
+        },
+        "NucleicAcidSequence": {
+          "type": "array", 
+          "items": { "$ref": "#/definitions/NucleicAcidSequenceType" }
+        }
+      }
+    },
+    "Figures": {
+      "type": "object",
+      "title": "FiguresType",
+      "description": "Section for all figures (unified management)",
+      "properties": {
+        "Figure": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/FigureRefType" }
+        }
+      },
+      "minProperties": 0
+    },
+    "Tables": {
+      "type": "object",
+      "title": "TablesType",
+      "description": "Section for all tables (unified management)",
+      "properties": {
+        "Table": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/TableRefType" }
+        }
+      },
+      "minProperties": 0
+    },
+    "IndustrialApplicability": {
+      "type": "object",
+      "title": "IndustrialApplicabilityType",
+      "properties": {
+        "Paragraph": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/ParagraphType" }
+        }
+      },
+      "minProperties": 0
+    },
+    "InternationalSearchReport": {
+      "type": "object",
+      "title": "InternationalSearchReportType",
+      "properties": {
+        "Section": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/SectionType" }
+        },
+        "Table": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/TableRefType" }
+        }
+      },
+      "minProperties": 0
+    },
+    "PatentFamilyInformation": {
+      "type": "object",
+      "title": "PatentFamilyInformationType",
+      "properties": {
+        "Table": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/TableRefType" }
+        }
+      },
+      "minProperties": 0
+    },
+    "FrontPageContinuation": {
+      "type": "object",
+      "title": "FrontPageContinuationType",
+      "properties": {
+        "DesignatedCountries": { "$ref": "#/definitions/DesignatedCountriesType" },
+        "Inventors": { "$ref": "#/definitions/InventorsType" },
+        "FTerms": { "$ref": "#/definitions/FTermsType" },
+        "AbstractContinuation": { "$ref": "#/definitions/AbstractType" }
+      },
+      "minProperties": 0
+    }
+  },
+  "definitions": {
+    "PersonType": {
+      "type": "object",
+      "properties": {
+        "Name": { "type": "string" },
+        "Address": { "type": "string" }
+      },
+      "required": [ "Name" ]
+    },
+    "OrganizationType": {
+      "type": "object",
+      "properties": {
+        "Name": { "type": "string" },
+        "Address": { "type": "string" }
+      },
+      "required": [ "Name" ]
+    },
+    "ClaimType": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "number": { "type": "integer" },
+        "Text": { "$ref": "#/definitions/ParagraphType" },
+        "ChemicalStructure": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/ChemicalStructureType" }
+        },
+        "BiologicalSequence": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/BiologicalSequenceRefType" }
+        },
+        "BiologicalSequence": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/BiologicalSequenceRefType" }
+        },
+        "BiologicalSequence": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/BiologicalSequenceRefType" }
+        },
+        "BiologicalSequence": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/BiologicalSequenceRefType" }
+        },
+        "BiologicalSequence": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/BiologicalSequenceRefType" }
+        }
+      },
+      "required": [ "id", "Text" ]
+    },
+    "SectionType": {
+      "type": "object",
+      "properties": {
+        "Title": { "type": "string" },
+        "Paragraph": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/ParagraphType" }
+        },
+        "ChemicalStructure": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/ChemicalStructureType" }
+        },
+        "Figure": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/FigureRefType" }
+        },
+        "Table": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/TableRefType" }
+        }
+      }
+    },
+    "ExamplesType": {
+      "type": "object",
+      "properties": {
+        "Example": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/ExampleType" }
+        }
+      }
+    },
+    "ExampleType": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "Title": { "type": "string" },
+        "Paragraph": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/ParagraphType" }
+        },
+        "ChemicalStructure": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/ChemicalStructureType" }
+        },
+        "Figure": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/FigureRefType" }
+        },
+        "Table": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/TableRefType" }
+        }
+      },
+      "required": [ "id", "Title" ]
+    },
+    "ParagraphType": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "content": { "type": "string" }
+      },
+      "required": [ "content" ]
+    },
+    "ImageRefType": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "refId": { "type": "string" },
+        "src": { "type": "string" },
+        "alt": { "type": "string" },
+        "type": { "type": "string" }
+      },
+      "required": [ "id", "refId" ]
+    },
+    "ChemicalStructureType": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "identifier": { "type": "string" },
+        "compound_id": { "type": "string", "description": "Reference to compound in ChemicalStructureLibrary" },
+        "image_reference": { "$ref": "#/definitions/ImageRefType" },
+        "structure_data": { "$ref": "#/definitions/MoleculeType" },
+        "patent_context": {
+          "type": "object",
+          "properties": {
+            "role": {
+              "type": "string",
+              "enum": ["active_ingredient", "intermediate", "starting_material", "product", "byproduct", "catalyst", "solvent", "reagent", "comparative_example"]
+            },
+            "example_number": { "type": "string" },
+            "claim_reference": { "type": "array", "items": { "type": "string" } },
+            "synthesis_step": { "type": "integer" },
+            "yield": { "type": "string" },
+            "purity": { "type": "string" },
+            "characterization_data": {
+              "type": "object",
+              "properties": {
+                "nmr": { "type": "array", "items": { "type": "string" } },
+                "ir": { "type": "string" },
+                "ms": { "type": "string" },
+                "elemental_analysis": { "type": "string" },
+                "melting_point": { "type": "string" },
+                "optical_rotation": { "type": "string" }
+              }
+            }
+          }
+        }
+      },
+      "required": [ "id", "identifier" ]
+    },
+    "PatentChemicalCompoundType": {
+      "allOf": [
+        { "$ref": "#/definitions/MoleculeType" },
+        {
+          "properties": {
+            "patent_specific": {
+              "type": "object",
+              "properties": {
+                "compound_number": { "type": "string", "description": "Patent compound number (e.g., Compound 1, I-1)" },
+                "generic_structure": { "type": "boolean", "description": "Whether this is a generic/Markush structure" },
+                "substituent_definitions": {
+                  "type": "object",
+                  "patternProperties": {
+                    "^R[0-9]*$": {
+                      "type": "object",
+                      "properties": {
+                        "definition": { "type": "string" },
+                        "examples": { "type": "array", "items": { "type": "string" } },
+                        "preferred": { "type": "array", "items": { "type": "string" } }
+                      }
+                    }
+                  }
+                },
+                "pharmaceutically_acceptable_salts": { "type": "boolean" },
+                "stereoisomers_included": { "type": "boolean" },
+                "prodrugs_included": { "type": "boolean" },
+                "activity_data": {
+                  "type": "object",
+                  "properties": {
+                    "ic50": { "type": "string" },
+                    "ki": { "type": "string" },
+                    "ec50": { "type": "string" },
+                    "target": { "type": "string" },
+                    "assay_conditions": { "type": "string" }
+                  }
+                },
+                "synthesis_references": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "example_id": { "type": "string" },
+                      "step_number": { "type": "integer" },
+                      "yield": { "type": "string" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "MoleculeType": {
+      "type": "object",
+      "properties": {
+        "identifiers": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "iupac_name": { "type": "string" },
+            "cas_number": { "type": "string", "pattern": "^[0-9]+-[0-9]+-[0-9]+$" },
+            "smiles": { "type": "string" },
+            "inchi": { "type": "string" },
+            "inchi_key": { "type": "string" },
+            "pubchem_cid": { "type": "integer" },
+            "chemspider_id": { "type": "integer" }
+          },
+          "required": ["name"]
+        },
+        "formula": {
+          "type": "object",
+          "properties": {
+            "molecular": { "type": "string" },
+            "empirical": { "type": "string" },
+            "structural": { "type": "string" }
+          },
+          "required": ["molecular"]
+        },
+        "atoms": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "element": { "type": "string", "pattern": "^[A-Z][a-z]?$" },
+              "atomic_number": { "type": "integer", "minimum": 1, "maximum": 118 },
+              "mass_number": { "type": "integer" },
+              "formal_charge": { "type": "integer" },
+              "oxidation_state": { "type": "integer" },
+              "hybridization": {
+                "type": "string",
+                "enum": ["sp", "sp2", "sp3", "sp3d", "sp3d2", "dsp3", "d2sp3"]
+              },
+              "coordinates": {
+                "type": "object",
+                "properties": {
+                  "x": {"type": "number"},
+                  "y": {"type": "number"},
+                  "z": {"type": "number"}
+                },
+                "required": ["x", "y"]
+              },
+              "implicit_hydrogens": { "type": "integer", "minimum": 0 },
+              "stereochemistry": {
+                "type": "object",
+                "properties": {
+                  "configuration": {
+                    "type": "string",
+                    "enum": ["R", "S", "E", "Z", "alpha", "beta", "cis", "trans"]
+                  },
+                  "chirality": {
+                    "type": "string",
+                    "enum": ["tetrahedral", "square_planar", "trigonal_bipyramidal", "octahedral"]
+                  }
+                }
+              }
+            },
+            "required": ["id", "element"]
+          }
+        },
+        "bonds": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "atom1": { "type": "string" },
+              "atom2": { "type": "string" },
+              "order": { "type": "number", "enum": [1, 1.5, 2, 3] },
+              "type": {
+                "type": "string",
+                "enum": ["covalent", "ionic", "metallic", "hydrogen", "van_der_waals", "coordinate"]
+              },
+              "stereochemistry": {
+                "type": "string",
+                "enum": ["wedge", "dash", "wavy", "up", "down", "either"]
+              },
+              "aromaticity": { "type": "boolean" },
+              "length": { "type": "number" }
+            },
+            "required": ["atom1", "atom2", "order"]
+          }
+        },
+        "rings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "atoms": { "type": "array", "items": {"type": "string"} },
+              "size": { "type": "integer", "minimum": 3 },
+              "aromaticity": { "type": "boolean" },
+              "conformation": {
+                "type": "string",
+                "enum": ["chair", "boat", "twist", "envelope", "planar"]
+              },
+              "type": {
+                "type": "string",
+                "enum": ["saturated", "unsaturated", "aromatic", "antiaromatic"]
+              }
+            },
+            "required": ["atoms"]
+          }
+        },
+        "functional_groups": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "hydroxyl", "carbonyl", "carboxyl", "amino", "amide", "ester", 
+                  "ether", "aldehyde", "ketone", "nitro", "nitrile", "sulfhydryl",
+                  "phosphate", "methyl", "ethyl", "phenyl", "benzyl", "halogen",
+                  "acetal", "hemiacetal", "ketal", "hemiketal", "anhydride"
+                ]
+              },
+              "atoms": { "type": "array", "items": {"type": "string"} },
+              "position": {
+                "oneOf": [
+                  {"type": "string"},
+                  {"type": "array", "items": {"type": "string"}}
+                ]
+              },
+              "count": { "type": "integer", "minimum": 1 }
+            },
+            "required": ["type"]
+          }
+        },
+        "stereochemistry": {
+          "type": "object",
+          "properties": {
+            "chirality": {
+              "type": "string",
+              "enum": ["achiral", "chiral", "meso"]
+            },
+            "optical_activity": {
+              "type": "string",
+              "enum": ["dextrorotatory", "levorotatory", "racemic", "inactive"]
+            },
+            "stereoisomer_type": {
+              "type": "string",
+              "enum": ["enantiomer", "diastereomer", "epimer", "anomer"]
+            },
+            "absolute_configuration": {
+              "type": "string",
+              "enum": ["D", "L", "R", "S"]
+            }
+          }
+        },
+        "structure_type": {
+          "type": "string",
+          "enum": [
+            "organic", "inorganic", "organometallic", "coordination_complex",
+            "ionic", "covalent", "polymer", "biomolecule", "natural_product"
+          ]
+        },
+        "molecular_properties": {
+          "type": "object",
+          "properties": {
+            "molecular_weight": { "type": "number" },
+            "exact_mass": { "type": "number" },
+            "charge": { "type": "integer" },
+            "multiplicity": { "type": "integer" },
+            "symmetry_point_group": { "type": "string" },
+            "dipole_moment": { "type": "number" }
+          }
+        }
+      },
+      "required": ["identifiers", "formula", "atoms"]
+    },
+    "FigureRefType": {
+      "allOf": [
+        { "$ref": "#/definitions/ImageRefType" },
+        {
+          "properties": {
+            "Caption": { "$ref": "#/definitions/ParagraphType" },
+            "number": { "type": "integer" },
+            "type": { "type": "string", "const": "figure" }
+          }
+        }
+      ]
+    },
+    "TableRefType": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "number": { "type": "integer" },
+        "title": { "type": "string" },
+        "type": { "type": "string", "const": "table" },
+        "refId": { "type": "string" },
+        "alt": { "type": "string" }
+      },
+      "required": [ "id", "refId" ]
+    },
+    "DesignatedCountriesType": {
+      "type": "object",
+      "properties": {
+        "RegionGroup": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/RegionGroupType" }
+        }
+      }
+    },
+    "RegionGroupType": {
+      "type": "object",
+      "properties": {
+        "Countries": { "type": "string" },
+        "type": { "type": "string" }
+      },
+      "required": [ "Countries", "type" ]
+    },
+    "FTermsType": {
+      "type": "object",
+      "properties": {
+        "FTerm": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/FTermType" }
+        }
+      }
+    },
+    "FTermType": {
+      "type": "object",
+      "properties": {
+        "Code": { "type": "string" },
+        "Description": { "type": "string" }
+      },
+      "required": [ "Code" ]
+    },
+    "ProteinSequenceType": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique identifier for the protein sequence" },
+        "seq_id": { "type": "string", "description": "Patent sequence ID (e.g., SEQ ID NO: 1)" },
+        "identifiers": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string", "description": "Protein name" },
+            "gene_name": { "type": "string", "description": "Gene name" },
+            "organism": { "type": "string", "description": "Source organism" },
+            "uniprot_id": { "type": "string", "description": "UniProt accession" },
+            "genbank_id": { "type": "string", "description": "GenBank accession" },
+            "pdb_id": { "type": "string", "description": "PDB ID" }
+          },
+          "required": ["name"]
+        },
+        "sequence": {
+          "type": "object",
+          "properties": {
+            "amino_acid_sequence": {
+              "type": "string",
+              "pattern": "^[ACDEFGHIKLMNPQRSTVWY*X-]+$",
+              "description": "Single letter amino acid code sequence (A,C,D,E,F,G,H,I,K,L,M,N,P,Q,R,S,T,V,W,Y,*,X,-)"
+            },
+            "length": { "type": "integer", "minimum": 1, "description": "Sequence length in amino acids" },
+            "molecular_weight": { "type": "number", "description": "Molecular weight in Da" },
+            "isoelectric_point": { "type": "number", "description": "Theoretical pI" },
+            "modifications": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "position": { "type": "integer", "description": "Position in sequence (1-based)" },
+                  "type": { "type": "string", "enum": ["phosphorylation", "glycosylation", "methylation", "acetylation", "ubiquitination", "sumoylation", "cleavage", "mutation", "other"] },
+                  "description": { "type": "string", "description": "Description of modification" },
+                  "from_residue": { "type": "string", "pattern": "^[ACDEFGHIKLMNPQRSTVWY]$" },
+                  "to_residue": { "type": "string", "pattern": "^[ACDEFGHIKLMNPQRSTVWY]$" }
+                },
+                "required": ["position", "type"]
+              }
+            }
+          },
+          "required": ["amino_acid_sequence", "length"]
+        },
+        "functional_domains": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string", "description": "Domain name" },
+              "type": { "type": "string", "enum": ["signal_peptide", "transmembrane", "catalytic", "binding", "regulatory", "structural", "linker", "tag", "other"] },
+              "start_position": { "type": "integer", "minimum": 1 },
+              "end_position": { "type": "integer", "minimum": 1 },
+              "description": { "type": "string" },
+              "pfam_id": { "type": "string", "description": "Pfam domain ID" }
+            },
+            "required": ["name", "type", "start_position", "end_position"]
+          }
+        },
+        "structural_features": {
+          "type": "object",
+          "properties": {
+            "secondary_structure": {
+              "type": "string",
+              "pattern": "^[HEC-]+$",
+              "description": "Secondary structure (H=helix, E=strand, C=coil, -=unstructured)"
+            },
+            "disulfide_bonds": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "cys1_position": { "type": "integer" },
+                  "cys2_position": { "type": "integer" }
+                },
+                "required": ["cys1_position", "cys2_position"]
+              }
+            }
+          }
+        },
+        "patent_context": {
+          "type": "object",
+          "properties": {
+            "role": { "type": "string", "enum": ["antigen", "antibody", "enzyme", "receptor", "ligand", "therapeutic", "diagnostic", "vaccine", "biomarker", "control"] },
+            "expression_system": { "type": "string", "description": "Expression system used" },
+            "activity_data": { "type": "string", "description": "Biological activity description" },
+            "claim_reference": { "type": "array", "items": { "type": "string" } },
+            "example_reference": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      },
+      "required": ["id", "identifiers", "sequence"]
+    },
+    "NucleicAcidSequenceType": {
+      "type": "object", 
+      "properties": {
+        "id": { "type": "string", "description": "Unique identifier for the nucleic acid sequence" },
+        "seq_id": { "type": "string", "description": "Patent sequence ID (e.g., SEQ ID NO: 1)" },
+        "identifiers": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string", "description": "Sequence name" },
+            "gene_name": { "type": "string", "description": "Gene name" },
+            "organism": { "type": "string", "description": "Source organism" },
+            "genbank_id": { "type": "string", "description": "GenBank accession" },
+            "embl_id": { "type": "string", "description": "EMBL accession" },
+            "ddbj_id": { "type": "string", "description": "DDBJ accession" }
+          },
+          "required": ["name"]
+        },
+        "sequence": {
+          "type": "object",
+          "properties": {
+            "nucleotide_sequence": {
+              "type": "string",
+              "pattern": "^[ATCGURYKMSWBDHVN-]+$", 
+              "description": "Nucleotide sequence using IUPAC codes (A,T,C,G,U,R,Y,K,M,S,W,B,D,H,V,N,-)"
+            },
+            "sequence_type": { "type": "string", "enum": ["DNA", "RNA", "cDNA", "genomic_DNA", "mRNA", "tRNA", "rRNA", "miRNA", "siRNA", "shRNA", "lncRNA", "other"] },
+            "length": { "type": "integer", "minimum": 1, "description": "Sequence length in nucleotides" },
+            "gc_content": { "type": "number", "minimum": 0, "maximum": 100, "description": "GC content percentage" },
+            "complement_sequence": {
+              "type": "string", 
+              "pattern": "^[ATCGURYKMSWBDHVN-]+$",
+              "description": "Complement sequence if applicable"
+            }
+          },
+          "required": ["nucleotide_sequence", "sequence_type", "length"]
+        },
+        "genetic_elements": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string", "description": "Element name" },
+              "type": { "type": "string", "enum": ["promoter", "enhancer", "silencer", "operator", "terminator", "ribosome_binding_site", "kozak_sequence", "start_codon", "stop_codon", "splice_site", "poly_a_signal", "origin_of_replication", "selection_marker", "tag", "linker", "restriction_site", "primer_binding", "other"] },
+              "start_position": { "type": "integer", "minimum": 1 },
+              "end_position": { "type": "integer", "minimum": 1 },
+              "strand": { "type": "string", "enum": ["plus", "minus", "both"] },
+              "description": { "type": "string" }
+            },
+            "required": ["name", "type", "start_position", "end_position"]
+          }
+        },
+        "coding_regions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string", "description": "Coding region name" },
+              "start_position": { "type": "integer", "minimum": 1 },
+              "end_position": { "type": "integer", "minimum": 1 },
+              "strand": { "type": "string", "enum": ["plus", "minus"] },
+              "reading_frame": { "type": "integer", "enum": [1, 2, 3] },
+              "translated_protein": { "type": "string", "description": "Reference to corresponding protein sequence ID" },
+              "codon_usage": {
+                "type": "object",
+                "patternProperties": {
+                  "^[ATCG]{3}$": { "type": "integer", "description": "Count of each codon" }
+                }
+              }
+            },
+            "required": ["name", "start_position", "end_position", "strand"]
+          }
+        },
+        "variations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "position": { "type": "integer", "description": "Position in sequence (1-based)" },
+              "type": { "type": "string", "enum": ["substitution", "insertion", "deletion", "inversion", "translocation", "SNP", "indel"] },
+              "reference": { "type": "string", "description": "Reference nucleotide(s)" },
+              "variant": { "type": "string", "description": "Variant nucleotide(s)" },
+              "description": { "type": "string" }
+            },
+            "required": ["position", "type"]
+          }
+        },
+        "patent_context": {
+          "type": "object",
+          "properties": {
+            "role": { "type": "string", "enum": ["vector", "plasmid", "probe", "primer", "guide_RNA", "therapeutic", "diagnostic", "vaccine", "expression_construct", "control"] },
+            "vector_type": { "type": "string", "description": "Type of vector if applicable" },
+            "expression_host": { "type": "string", "description": "Intended expression host" },
+            "application": { "type": "string", "description": "Patent application" },
+            "claim_reference": { "type": "array", "items": { "type": "string" } },
+            "example_reference": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      },
+      "required": ["id", "identifiers", "sequence"]
+    },
+    "BiologicalSequenceRefType": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique reference identifier" },
+        "sequence_id": { "type": "string", "description": "Reference to sequence in BiologicalSequenceLibrary" },
+        "sequence_type": { "type": "string", "enum": ["protein", "nucleic_acid"] },
+        "image_reference": { "$ref": "#/definitions/ImageRefType" },
+        "display_format": {
+          "type": "string", 
+          "enum": ["single_line", "multi_line", "formatted", "alignment", "secondary_structure"],
+          "description": "How the sequence is displayed in the patent"
+        },
+        "start_position": { "type": "integer", "description": "Start position if partial sequence shown" },
+        "end_position": { "type": "integer", "description": "End position if partial sequence shown" },
+        "context": { "type": "string", "description": "Context where this sequence appears" }
+      },
+      "required": ["id", "sequence_id", "sequence_type"]
+    }
+  }
+}

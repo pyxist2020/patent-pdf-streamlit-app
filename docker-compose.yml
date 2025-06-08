@@ -1,0 +1,57 @@
+version: '3.8'
+
+services:
+  patent-pdf-streamlit-app:
+    build: .
+    container_name: patent-pdf-streamlit-app
+    ports:
+      - "8501:8501"
+    volumes:
+      # 開発時にソースコードの変更を反映させる場合（オプション）
+      - ./app.py:/app/app.py
+      - ./patent_extractor.py:/app/patent_extractor.py
+      - ./default_schema.json:/app/default_schema.json
+      - ./.streamlit:/app/.streamlit
+    environment:
+      # 各AIプロバイダーのAPIキーを環境変数として設定
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # Streamlit設定
+      - STREAMLIT_SERVER_PORT=8501
+      - STREAMLIT_SERVER_ADDRESS=0.0.0.0
+      - STREAMLIT_SERVER_HEADLESS=true
+      - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - patent-app-network
+
+networks:
+  patent-app-network:
+    driver: bridge
+
+# 本番環境用の設定例（volumes部分をコメントアウト）
+# services:
+#   patent-pdf-streamlit-app:
+#     build: .
+#     container_name: patent-pdf-streamlit-app
+#     ports:
+#       - "8501:8501"
+#     environment:
+#       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+#       - OPENAI_API_KEY=${OPENAI_API_KEY}
+#       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+#     restart: unless-stopped
+#     healthcheck:
+#       test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+#       interval: 30s
+#       timeout: 10s
+#       retries: 5
+#     networks:
+#       - patent-app-network
