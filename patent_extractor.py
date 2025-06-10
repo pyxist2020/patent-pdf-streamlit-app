@@ -210,8 +210,7 @@ class PatentExtractor:
                         {
                             "type": "input_file",
                             "input_file": {
-                                "data": pdf_data,
-                                "mime_type": "application/pdf"
+                                "file_data": f"data:application/pdf;base64,{pdf_data}"
                             }
                         }
                     ]
