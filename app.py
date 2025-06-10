@@ -206,7 +206,7 @@ with st.sidebar:
     
     # APIプロバイダーとモデル選択
     provider = st.selectbox(
-        "AIプロバイダー",
+        "AIプロバイダー（Google Geminiを推奨）",
         options=list(DEFAULT_MODEL_OPTIONS.keys())
     )
     
