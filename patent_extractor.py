@@ -208,8 +208,9 @@ class PatentExtractor:
                             """
                         },
                         {
-                            "type": "input_file",
-                            "input_file": {
+                            "type": "file",
+                            "file": {
+                                "filename": f"{pdf_path}",
                                 "file_data": f"data:application/pdf;base64,{pdf_data}"
                             }
                         }
