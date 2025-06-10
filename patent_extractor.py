@@ -210,6 +210,7 @@ class PatentExtractor:
                         {
                             "type": "file",
                             "file": {
+                                "file_id": "file1"
                                 "file_data": f"data:application/pdf;base64,{pdf_data}",
                             }
                         }
