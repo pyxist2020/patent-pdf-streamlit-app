@@ -257,7 +257,7 @@ class PatentExtractor:
                             """
                         },
                         {
-                            "type": "image",
+                            "type": "document",
                             "source": {
                                 "type": "base64",
                                 "media_type": "application/pdf",
