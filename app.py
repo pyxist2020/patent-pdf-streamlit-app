@@ -363,7 +363,7 @@ with st.sidebar:
             "最大トークン数",
             min_value=1024,
             max_value=65535,
-            value=4096,
+            value=32768,
             step=1024,
             help="生成AIが出力できる最大トークン数"
         )
