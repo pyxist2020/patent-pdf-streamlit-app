@@ -95,13 +95,199 @@ def split_pdf_chunks(pdf_path, chunk_size=2, overlap=1):
     return chunks
 
 def process_chunk(chunk, model_name, api_key, schema, prompt=None, temperature=0.1, max_tokens=32768):
-    """チャンクを処理"""
+    """チャンクを処理（JSONパースエラー対策）"""
     try:
-        extractor = PatentExtractor(model_name, api_key, schema, prompt, temperature, max_tokens)
-        result = extractor.process_patent_pdf(chunk["path"])
-        return {"id": chunk["id"], "pages": chunk["pages"], "status": "success", "data": result}
+        # JSON出力を強制するプロンプト
+        json_prompt = f"""
+        {prompt or "特許文書から情報を抽出してください。"}
+        
+        重要な指示:
+        - 必ず有効なJSONフォーマットで出力してください
+        - 文字列内の改行は\\nで表現してください
+        - ダブルクォートは\\"でエスケープしてください
+        - JSONの外にコメントや説明を含めないでください
+        - 出力はJSONのみにしてください
+        """
+        
+        extractor = PatentExtractor(model_name, api_key, schema, json_prompt, temperature, max_tokens)
+        raw_result = extractor.process_patent_pdf(chunk["path"])
+        
+        # JSONレスポンスのクリーニング
+        cleaned_result = clean_json_response(raw_result)
+        
+        return {"id": chunk["id"], "pages": chunk["pages"], "status": "success", "data": cleaned_result}
+    except json.JSONDecodeError as e:
+        return {"id": chunk["id"], "pages": chunk["pages"], "status": "error", 
+                "error": f"JSON解析エラー: {str(e)}", "data": {}}
     except Exception as e:
-        return {"id": chunk["id"], "pages": chunk["pages"], "status": "error", "error": str(e), "data": {}}
+        return {"id": chunk["id"], "pages": chunk["pages"], "status": "error", 
+                "error": str(e), "data": {}}
+
+def clean_json_response(response):
+    """AIレスポンスのJSONクリーニング"""
+    if isinstance(response, dict):
+        return response  # 既にパース済みの場合
+    
+    if isinstance(response, str):
+        try:
+            # 基本的なJSONクリーニング
+            cleaned = response.strip()
+            
+            # マークダウンコードブロックの除去
+            if cleaned.startswith('```json'):
+                cleaned = cleaned[7:]
+            if cleaned.startswith('```'):
+                cleaned = cleaned[3:]
+            if cleaned.endswith('```'):
+                cleaned = cleaned[:-3]
+            
+            # 前後の空白除去
+            cleaned = cleaned.strip()
+            
+            # JSONとして解析
+            parsed = json.loads(cleaned)
+            return parsed
+            
+        except json.JSONDecodeError:
+            # JSONパースに失敗した場合は空の辞書を返す
+            st.warning(f"JSON解析に失敗しました。空のデータを返します。")
+            return {}
+    
+    return response or {}
+
+def safe_json_dumps(obj, **kwargs):
+    """安全なJSON文字列化"""
+    try:
+        return json.dumps(obj, ensure_ascii=False, **kwargs)
+    except (TypeError, ValueError) as e:
+        # シリアライズできないオブジェクトがある場合の対処
+        st.warning(f"JSON変換エラー: {e}")
+        return json.dumps({"error": "JSON変換に失敗しました"}, ensure_ascii=False, **kwargs)
+
+def merge_text(text1, text2):
+    """テキストをマージ（重複除去・安全性向上）"""
+    # 入力値の型チェックと安全な変換
+    str1 = str(text1) if text1 is not None else ""
+    str2 = str(text2) if text2 is not None else ""
+    
+    if not str1 or not str2:
+        return str1 or str2
+    
+    str1, str2 = str1.strip(), str2.strip()
+    
+    # 完全一致の場合は片方を返す
+    if str1 == str2:
+        return str1
+    
+    # 一方が他方に含まれる場合は長い方を返す
+    if str1 in str2:
+        return str2
+    if str2 in str1:
+        return str1
+    
+    # 空白区切りで分割して重複を除去
+    try:
+        words1 = str1.split()
+        words2 = str2.split()
+        
+        # 大部分が重複している場合（類似度80%以上）は長い方を採用
+        common_words = set(words1) & set(words2)
+        total_words = set(words1) | set(words2)
+        if total_words and len(common_words) / len(total_words) > 0.8:
+            return str1 if len(str1) > len(str2) else str2
+        
+        # 継続パターンをチェック
+        continues = (not str1.endswith(('.', '。', '!', '？')) or 
+                    str1.endswith((',', '、', ';')) or 
+                    str2.startswith(('が', 'を', 'に', 'の', 'は', 'と', 'で')) or 
+                    (str2 and str2[0].islower()))
+        
+        return f"{str1} {str2}" if continues else f"{str1}\n\n{str2}"
+    except Exception:
+        # エラーが発生した場合は安全に結合
+        return f"{str1} {str2}"
+
+def merge_items(list1, list2):
+    """リストアイテムをマージ（重複除去・エラー対策）"""
+    if not isinstance(list1, list):
+        list1 = []
+    if not isinstance(list2, list):
+        list2 = []
+    
+    if not list1:
+        return list2
+    if not list2:
+        return list1
+    
+    result = list1.copy()
+    
+    for item in list2:
+        is_duplicate = False
+        
+        try:
+            for existing in result:
+                if isinstance(item, dict) and isinstance(existing, dict):
+                    # 辞書の場合：キーと値の組み合わせで判定
+                    if (item.get('id') and existing.get('id') and item['id'] == existing['id']) or \
+                       (item.get('number') and existing.get('number') and item['number'] == existing['number']) or \
+                       (item.get('content') and existing.get('content') and 
+                        item.get('content', '') == existing.get('content', '')):
+                        is_duplicate = True
+                        # より完全な情報で既存を更新
+                        if len(str(item)) > len(str(existing)):
+                            idx = result.index(existing)
+                            result[idx] = item
+                        break
+                elif isinstance(item, str) and isinstance(existing, str):
+                    # 文字列の場合：内容で判定
+                    if item == existing or item in existing or existing in item:
+                        is_duplicate = True
+                        # より長い文字列で更新
+                        if len(item) > len(existing):
+                            idx = result.index(existing)
+                            result[idx] = item
+                        break
+                elif str(item) == str(existing):
+                    is_duplicate = True
+                    break
+        except Exception:
+            # 比較エラーの場合は重複していないとみなす
+            pass
+        
+        if not is_duplicate:
+            result.append(item)
+    
+    return result
+
+def merge_dicts(dict1, dict2):
+    """辞書を再帰的にマージ（エラー対策強化）"""
+    if not isinstance(dict1, dict):
+        dict1 = {}
+    if not isinstance(dict2, dict):
+        dict2 = {}
+    
+    result = dict1.copy()
+    
+    for key, value in dict2.items():
+        try:
+            if key in result:
+                if isinstance(result[key], dict) and isinstance(value, dict):
+                    result[key] = merge_dicts(result[key], value)
+                elif isinstance(result[key], list) and isinstance(value, list):
+                    result[key] = merge_items(result[key], value)
+                elif isinstance(result[key], str) and isinstance(value, str):
+                    result[key] = merge_text(result[key], value)
+                else:
+                    # 型が異なる場合は文字列として結合
+                    result[key] = merge_text(str(result[key]), str(value))
+            else:
+                result[key] = value
+        except Exception as e:
+            # マージエラーの場合は新しい値を採用
+            st.warning(f"マージエラー (キー: {key}): {e}")
+            result[key] = value
+    
+    return result
 
 def merge_text(text1, text2):
     """テキストをマージ（重複除去）"""
@@ -183,57 +369,77 @@ def merge_items(list1, list2):
     return result
 
 def clean_duplicates(data):
-    """データ全体から重複を除去"""
-    if isinstance(data, dict):
-        cleaned = {}
-        for key, value in data.items():
-            if isinstance(value, str):
-                # 文字列から重複パターンを除去
-                cleaned_text = remove_repeated_patterns(value)
-                cleaned[key] = cleaned_text
-            elif isinstance(value, (dict, list)):
-                cleaned[key] = clean_duplicates(value)
-            else:
-                cleaned[key] = value
-        return cleaned
-    elif isinstance(data, list):
-        return [clean_duplicates(item) for item in data]
-    else:
+    """データ全体から重複を除去（エラー対策強化）"""
+    try:
+        if isinstance(data, dict):
+            cleaned = {}
+            for key, value in data.items():
+                try:
+                    if isinstance(value, str):
+                        # 文字列から重複パターンを除去
+                        cleaned_text = remove_repeated_patterns(value)
+                        cleaned[key] = cleaned_text
+                    elif isinstance(value, (dict, list)):
+                        cleaned[key] = clean_duplicates(value)
+                    else:
+                        cleaned[key] = value
+                except Exception as e:
+                    # 個別キーの処理でエラーが発生した場合は元の値を保持
+                    st.warning(f"データクリーニングエラー (キー: {key}): {e}")
+                    cleaned[key] = value
+            return cleaned
+        elif isinstance(data, list):
+            try:
+                return [clean_duplicates(item) for item in data]
+            except Exception:
+                # リスト処理でエラーの場合は元のリストを返す
+                return data
+        else:
+            return data
+    except Exception:
+        # 全体処理でエラーの場合は元のデータを返す
         return data
 
 def remove_repeated_patterns(text):
-    """文字列から重複パターンを除去"""
-    if not isinstance(text, str):
-        return text
-    
-    # 空白で分割
-    words = text.split()
-    if len(words) <= 1:
-        return text
-    
-    # 連続する重複単語を除去
-    cleaned_words = [words[0]]
-    for word in words[1:]:
-        if word != cleaned_words[-1]:
-            cleaned_words.append(word)
-    
-    # 同じフレーズの繰り返しを検出して除去
-    result_text = ' '.join(cleaned_words)
-    
-    # より長いパターンの重複を検出
-    for pattern_length in range(len(cleaned_words) // 2, 0, -1):
-        pattern = cleaned_words[:pattern_length]
-        pattern_str = ' '.join(pattern)
+    """文字列から重複パターンを除去（エラー対策）"""
+    try:
+        if not isinstance(text, str) or not text.strip():
+            return text
         
-        # パターンが複数回繰り返されているかチェック
-        if result_text.count(pattern_str) > 1:
-            # 最初の出現のみを残す
-            parts = result_text.split(pattern_str)
-            if len(parts) > 2:  # パターンが2回以上出現
-                result_text = pattern_str.join([parts[0], parts[1]]) + pattern_str
-                break
-    
-    return result_text.strip()
+        # 空白で分割
+        words = text.split()
+        if len(words) <= 1:
+            return text
+        
+        # 連続する重複単語を除去
+        cleaned_words = [words[0]]
+        for word in words[1:]:
+            if word != cleaned_words[-1]:
+                cleaned_words.append(word)
+        
+        # 同じフレーズの繰り返しを検出して除去
+        result_text = ' '.join(cleaned_words)
+        
+        # より長いパターンの重複を検出
+        for pattern_length in range(min(len(cleaned_words) // 2, 10), 0, -1):
+            try:
+                pattern = cleaned_words[:pattern_length]
+                pattern_str = ' '.join(pattern)
+                
+                # パターンが複数回繰り返されているかチェック
+                if len(pattern_str) > 0 and result_text.count(pattern_str) > 1:
+                    # 最初の出現のみを残す
+                    parts = result_text.split(pattern_str)
+                    if len(parts) > 2:  # パターンが2回以上出現
+                        result_text = pattern_str.join([parts[0], parts[1]]) + pattern_str
+                        break
+            except Exception:
+                continue
+        
+        return result_text.strip()
+    except Exception:
+        # エラーの場合は元のテキストを返す
+        return str(text) if text is not None else ""
 
 def merge_dicts(dict1, dict2):
     """辞書を再帰的にマージ"""
@@ -444,7 +650,7 @@ with col2:
                 st.json(display_data)
                 
                 # ダウンロード
-                json_str = json.dumps(result, ensure_ascii=False, indent=2)
+                json_str = safe_json_dumps(result, indent=2)
                 filename = f"{Path(uploaded_pdf.name).stem}_processed.json"
                 st.download_button("📥 JSONダウンロード", json_str.encode("utf-8"), filename, "application/json")
     else:
