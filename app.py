@@ -4,871 +4,344 @@ import os
 import tempfile
 from pathlib import Path
 from pypdf import PdfReader, PdfWriter
-from typing import Dict, List, Any
-
+from typing import Dict, List
 from patent_extractor import PatentExtractor
 
 # ページ設定
-st.set_page_config(
-    page_title="特許PDF構造化ツール",
-    page_icon="📄",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="特許PDF構造化ツール", page_icon="📄", layout="wide")
 
 # カスタムCSS
 st.markdown("""
 <style>
-    .main .block-container {
-        padding-top: 2rem;
-    }
-    .stButton button {
-        width: 100%;
-    }
-    .json-display {
-        border: 1px solid #e0e0e0;
-        border-radius: 5px;
-        padding: 10px;
-        background-color: #f5f5f5;
-        height: 500px;
-        overflow: auto;
-    }
-    .stat-box {
-        padding: 10px;
-        border-radius: 5px;
-        margin-bottom: 10px;
-        text-align: center;
-    }
-    .blue-stat {
-        background-color: #f0f5ff;
-        border: 1px solid #d0e0ff;
-    }
-    .green-stat {
-        background-color: #f0fff5;
-        border: 1px solid #d0ffe0;
-    }
-    .orange-stat {
-        background-color: #fff5f0;
-        border: 1px solid #ffe0d0;
-    }
-    .title-area {
-        text-align: center;
-        margin-bottom: 2rem;
-    }
-    .page-progress {
-        margin: 5px 0;
-        padding: 8px 12px;
-        border-radius: 5px;
-        background-color: #f8f9fa;
-        border-left: 4px solid #007bff;
-        font-size: 0.9em;
-    }
-    .error-page {
-        background-color: #fff5f5;
-        border-left: 4px solid #dc3545;
-    }
-    .success-page {
-        background-color: #f0fff4;
-        border-left: 4px solid #28a745;
-    }
-    .progress-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-        gap: 5px;
-        max-height: 200px;
-        overflow-y: auto;
-        border: 1px solid #e0e0e0;
-        border-radius: 5px;
-        padding: 10px;
-        background-color: #fafafa;
-    }
-    .page-badge {
-        display: inline-block;
-        padding: 4px 8px;
-        margin: 2px;
-        border-radius: 12px;
-        font-size: 0.8em;
-        font-weight: 500;
-        text-align: center;
-    }
-    .page-success {
-        background-color: #d4edda;
-        color: #155724;
-        border: 1px solid #c3e6cb;
-    }
-    .page-error {
-        background-color: #f8d7da;
-        color: #721c24;
-        border: 1px solid #f5c6cb;
-    }
-    .page-processing {
-        background-color: #d1ecf1;
-        color: #0c5460;
-        border: 1px solid #bee5eb;
-    }
+    .stat-box { padding: 10px; border-radius: 5px; margin-bottom: 10px; text-align: center; }
+    .blue-stat { background-color: #f0f5ff; border: 1px solid #d0e0ff; }
+    .green-stat { background-color: #f0fff5; border: 1px solid #d0ffe0; }
+    .orange-stat { background-color: #fff5f0; border: 1px solid #ffe0d0; }
+    .page-badge { display: inline-block; padding: 4px 8px; margin: 2px; border-radius: 12px; 
+                  font-size: 0.8em; font-weight: 500; text-align: center; }
+    .page-success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+    .page-error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+    .page-processing { background-color: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
 </style>
 """, unsafe_allow_html=True)
 
-# モデルオプション（デフォルトの選択肢）
-DEFAULT_MODEL_OPTIONS = {
+# モデルオプション
+DEFAULT_MODELS = {
     "Google Gemini": ["gemini-1.5-pro", "gemini-1.5-flash"],
-    "OpenAI": ["gpt-4o", "gpt-4-vision-preview"],
+    "OpenAI": ["gpt-4o", "gpt-4o-mini"],
     "Anthropic": ["claude-3-opus-20240229", "claude-3-sonnet-20240229", "claude-3-haiku-20240307"]
 }
 
-# 環境変数からAPIキーを取得する関数
-def get_api_key_from_env(provider):
-    if provider == "Google Gemini":
-        return os.environ.get("GOOGLE_API_KEY", "")
-    elif provider == "OpenAI":
-        return os.environ.get("OPENAI_API_KEY", "")
-    elif provider == "Anthropic":
-        return os.environ.get("ANTHROPIC_API_KEY", "")
-    return ""
-
-# プロバイダーからモデル名のプレフィックスを推定する関数
-def get_model_prefix(provider):
-    if provider == "Google Gemini":
-        return "gemini-"
-    elif provider == "OpenAI":
-        return "gpt-"
-    elif provider == "Anthropic":
-        return "claude-"
-    return ""
-
-# モデル名が有効かチェックする関数
-def is_valid_model_name(model_name, provider):
-    """モデル名が指定されたプロバイダーに適しているかをチェック"""
-    if not model_name:
-        return False
-    
-    model_lower = model_name.lower()
-    
-    if provider == "Google Gemini":
-        return "gemini" in model_lower
-    elif provider == "OpenAI":
-        return "gpt" in model_lower or "openai" in model_lower
-    elif provider == "Anthropic":
-        return "claude" in model_lower
-    
-    return True  # その他の場合は通す
-
-# APIから利用可能なモデル一覧を取得する関数
-@st.cache_data(ttl=3600)  # 1時間キャッシュ
-def fetch_available_models(provider, api_key):
-    """APIから利用可能なモデル一覧を取得"""
+@st.cache_data(ttl=3600)
+def get_models(provider, api_key):
+    """利用可能なモデルを取得"""
+    if not api_key:
+        return DEFAULT_MODELS.get(provider, [])
     try:
-        if not api_key:
-            return []
-        
         if provider == "Google Gemini":
             import google.generativeai as genai
             genai.configure(api_key=api_key)
-            models = genai.list_models()
-            return [model.name.replace('models/', '') for model in models 
-                   if 'generateContent' in model.supported_generation_methods]
-        
+            return [m.name.replace('models/', '') for m in genai.list_models() 
+                   if 'generateContent' in m.supported_generation_methods]
         elif provider == "OpenAI":
             from openai import OpenAI
-            client = OpenAI(api_key=api_key)
-            models = client.models.list()
-            # GPTモデルと Vision対応モデルのみをフィルタ
-            model_names = [model.id for model in models.data 
-                          if 'gpt' in model.id.lower() or 'vision' in model.id.lower()]
-            return sorted(model_names, reverse=True)  # 新しいモデルが上に来るようにソート
-        
+            models = OpenAI(api_key=api_key).models.list()
+            return sorted([m.id for m in models.data if 'gpt' in m.id.lower()], reverse=True)
         elif provider == "Anthropic":
-            # AnthropicのAPIはモデル一覧を提供していないため、既知のモデルを返す
-            return [
-                "claude-3-opus-20240229",
-                "claude-3-sonnet-20240229", 
-                "claude-3-haiku-20240307",
-                "claude-3-5-sonnet-20241022",
-                "claude-3-5-haiku-20241022"
-            ]
-        
-        return []
-        
-    except Exception as e:
-        st.error(f"モデル一覧の取得に失敗しました: {str(e)}")
-        return []
-
-# モデル一覧を取得してキャッシュする関数
-def get_models_with_cache(provider, api_key):
-    """キャッシュを使用してモデル一覧を取得"""
-    if not api_key:
-        return DEFAULT_MODEL_OPTIONS.get(provider, [])
-    
-    try:
-        available_models = fetch_available_models(provider, api_key)
-        if available_models:
-            return available_models
-        else:
-            # APIで取得できない場合はデフォルトを使用
-            return DEFAULT_MODEL_OPTIONS.get(provider, [])
+            return ["claude-3-opus-20240229", "claude-3-sonnet-20240229", "claude-3-haiku-20240307"]
     except:
-        return DEFAULT_MODEL_OPTIONS.get(provider, [])
+        pass
+    return DEFAULT_MODELS.get(provider, [])
 
-# JSONスキーマをロードする関数
-def load_schema(file_path=None, file_content=None):
+def load_schema(file_path=None, content=None):
+    """JSONスキーマを読み込み"""
     try:
         if file_path and os.path.exists(file_path):
             with open(file_path, "r", encoding="utf-8") as f:
                 return json.load(f)
-        elif file_content:
-            return json.loads(file_content)
-        return {}
+        elif content:
+            return json.loads(content)
     except Exception as e:
-        st.error(f"JSONスキーマの読み込みエラー: {str(e)}")
-        return {}
+        st.error(f"スキーマ読み込みエラー: {e}")
+    return {}
 
-# PDFを1ページずつ分割して処理する関数
-def split_pdf_to_pages(pdf_path: str) -> List[str]:
-    """PDFを1ページずつ分割して一時ファイルのパスリストを返す"""
-    page_paths = []
+def split_pdf_chunks(pdf_path, chunk_size=2, overlap=1):
+    """PDFを重複チャンクに分割"""
+    chunks = []
     try:
         reader = PdfReader(pdf_path)
+        total_pages = len(reader.pages)
         
-        for page_num in range(len(reader.pages)):
-            # 新しいPDFライターを作成
+        for i, start in enumerate(range(0, total_pages, chunk_size - overlap)):
+            end = min(start + chunk_size, total_pages)
             writer = PdfWriter()
-            writer.add_page(reader.pages[page_num])
             
-            # 一時ファイルとして保存
-            temp_path = tempfile.mktemp(suffix=f"_page_{page_num + 1}.pdf")
-            with open(temp_path, "wb") as output_file:
-                writer.write(output_file)
+            for page_idx in range(start, end):
+                writer.add_page(reader.pages[page_idx])
             
-            page_paths.append(temp_path)
-        
-        return page_paths
+            temp_path = tempfile.mktemp(suffix=f"_chunk_{i+1}.pdf")
+            with open(temp_path, "wb") as f:
+                writer.write(f)
+            
+            chunks.append({
+                "id": i + 1,
+                "path": temp_path,
+                "pages": list(range(start + 1, end + 1)),
+                "start": start + 1,
+                "end": end
+            })
     except Exception as e:
-        st.error(f"PDF分割エラー: {str(e)}")
-        return []
+        st.error(f"PDF分割エラー: {e}")
+    return chunks
 
-# 1ページのPDFを処理する関数
-def process_single_page(page_path: str, page_num: int, model_name: str, api_key: str, 
-                       schema: Dict, prompt: str = None, temperature: float = 0.1, 
-                       max_tokens: int = 4096) -> Dict:
-    """1ページのPDFを処理"""
+def process_chunk(chunk, model_name, api_key, schema, prompt=None, temperature=0.1, max_tokens=32768):
+    """チャンクを処理"""
     try:
-        extractor = PatentExtractor(
-            model_name=model_name,
-            api_key=api_key,
-            json_schema=schema,
-            user_prompt=prompt,
-            temperature=temperature,
-            max_tokens=max_tokens
-        )
-        result = extractor.process_patent_pdf(page_path)
-        return {
-            "page_number": page_num,
-            "status": "success",
-            "data": result
-        }
+        extractor = PatentExtractor(model_name, api_key, schema, prompt, temperature, max_tokens)
+        result = extractor.process_patent_pdf(chunk["path"])
+        return {"id": chunk["id"], "pages": chunk["pages"], "status": "success", "data": result}
     except Exception as e:
-        return {
-            "page_number": page_num,
-            "status": "error",
-            "error": str(e),
-            "data": {}
-        }
+        return {"id": chunk["id"], "pages": chunk["pages"], "status": "error", "error": str(e), "data": {}}
 
-# 複数ページの結果を統合する関数
-def merge_page_results(page_results: List[Dict]) -> Dict:
-    """複数ページの結果を統合してひとつのJSONを作成"""
-    merged_result = {
-        "processing_summary": {
-            "total_pages": len(page_results),
-            "successful_pages": sum(1 for r in page_results if r["status"] == "success"),
-            "failed_pages": sum(1 for r in page_results if r["status"] == "error"),
-            "page_details": []
-        }
-    }
+def merge_text(text1, text2):
+    """テキストをマージ"""
+    if not text1 or not text2:
+        return text1 or text2
     
-    # 各ページの詳細を記録
-    for result in page_results:
-        page_detail = {
-            "page_number": result["page_number"],
-            "status": result["status"]
-        }
-        if result["status"] == "error":
-            page_detail["error"] = result["error"]
-        merged_result["processing_summary"]["page_details"].append(page_detail)
+    text1, text2 = text1.strip(), text2.strip()
     
-    # 成功したページのデータを統合
-    successful_results = [r["data"] for r in page_results if r["status"] == "success"]
+    # 継続パターンをチェック
+    continues = (not text1.endswith(('.', '。', '!', '？')) or 
+                text1.endswith((',', '、', ';')) or 
+                text2.startswith(('が', 'を', 'に', 'の', 'は', 'と', 'で')) or 
+                (text2 and text2[0].islower()))
     
-    if not successful_results:
-        merged_result["error"] = "すべてのページで処理に失敗しました"
-        return merged_result
-    
-    # 基本的な統合戦略
-    # 1. publicationIdentifierは最初に見つかったものを使用
-    # 2. セクションは配列として統合
-    # 3. 単一値は最初に見つかったものを使用
-    
-    for i, result in enumerate(successful_results):
-        if i == 0:
-            # 最初の結果をベースとして使用
-            for key, value in result.items():
-                if key not in merged_result:
-                    merged_result[key] = value
-        else:
-            # 後続の結果をマージ
-            for key, value in result.items():
-                if key in merged_result:
-                    # 既存のキーがある場合の統合ロジック
-                    if isinstance(merged_result[key], dict) and isinstance(value, dict):
-                        # 辞書の場合は再帰的にマージ
-                        merged_result[key] = merge_dict_values(merged_result[key], value)
-                    elif isinstance(merged_result[key], list) and isinstance(value, list):
-                        # リストの場合は結合
-                        merged_result[key].extend(value)
-                    # 単一値の場合は最初の値を保持（上書きしない）
-                else:
-                    # 新しいキーの場合は追加
-                    merged_result[key] = value
-    
-    return merged_result
+    return f"{text1} {text2}" if continues else f"{text1}\n\n{text2}"
 
-def merge_dict_values(dict1: Dict, dict2: Dict) -> Dict:
-    """辞書の値を再帰的にマージ"""
+def merge_items(list1, list2):
+    """リストアイテムをマージ（重複除去）"""
+    result = list1.copy()
+    for item in list2:
+        if not any(str(item) in str(existing) for existing in result):
+            result.append(item)
+    return result
+
+def merge_dicts(dict1, dict2):
+    """辞書を再帰的にマージ"""
     result = dict1.copy()
-    
     for key, value in dict2.items():
         if key in result:
             if isinstance(result[key], dict) and isinstance(value, dict):
-                result[key] = merge_dict_values(result[key], value)
+                result[key] = merge_dicts(result[key], value)
             elif isinstance(result[key], list) and isinstance(value, list):
-                result[key].extend(value)
-            # 単一値の場合は最初の値を保持
+                result[key] = merge_items(result[key], value)
+            elif isinstance(result[key], str) and isinstance(value, str):
+                result[key] = merge_text(result[key], value)
         else:
             result[key] = value
+    return result
+
+def merge_chunks(chunk_results):
+    """チャンク結果を統合"""
+    successful = [r for r in chunk_results if r["status"] == "success"]
+    if not successful:
+        return {"error": "すべてのチャンクで処理失敗"}
+    
+    # 処理概要
+    result = {
+        "processing_summary": {
+            "total_chunks": len(chunk_results),
+            "successful_chunks": len(successful),
+            "failed_chunks": len(chunk_results) - len(successful)
+        }
+    }
+    
+    # データをマージ
+    for chunk in sorted(successful, key=lambda x: x["id"]):
+        for key, value in chunk["data"].items():
+            if key not in result:
+                result[key] = value
+            else:
+                if isinstance(result[key], dict) and isinstance(value, dict):
+                    result[key] = merge_dicts(result[key], value)
+                elif isinstance(result[key], list) and isinstance(value, list):
+                    result[key] = merge_items(result[key], value)
+                elif isinstance(result[key], str) and isinstance(value, str):
+                    result[key] = merge_text(result[key], value)
     
     return result
 
-# ページ単位でPDFを処理する関数
-def process_pdf_by_pages(pdf_path: str, model_name: str, api_key: str, schema: Dict, 
-                        prompt: str = None, temperature: float = 0.1, 
-                        max_tokens: int = 4096, progress_container=None) -> Dict:
-    """PDFを1ページずつ処理して結果を統合"""
+def process_pdf(pdf_path, model_name, api_key, schema, prompt=None, temperature=0.1, 
+               max_tokens=32768, chunk_size=2, overlap=1, progress_container=None):
+    """PDF全体を処理"""
+    chunks = split_pdf_chunks(pdf_path, chunk_size, overlap)
+    if not chunks:
+        return {"error": "PDF分割失敗"}
+    
+    results = []
+    total = len(chunks)
+    
+    if progress_container:
+        progress_bar = progress_container.progress(0)
+        status_text = progress_container.empty()
+        badge_container = progress_container.empty()
+    
     try:
-        # PDFを1ページずつ分割
-        page_paths = split_pdf_to_pages(pdf_path)
-        
-        if not page_paths:
-            return {"error": "PDFの分割に失敗しました"}
-        
-        total_pages = len(page_paths)
-        page_results = []
-        
-        # 進捗表示用のコンテナ
-        if progress_container:
-            progress_bar = progress_container.progress(0)
-            status_text = progress_container.empty()
-            # ページ状況表示用のコンテナ
-            page_status_container = progress_container.container()
-            page_status_placeholder = page_status_container.empty()
-        
-        try:
-            # 各ページを処理
-            for i, page_path in enumerate(page_paths):
-                page_num = i + 1
-                
-                # 進捗更新
-                if progress_container:
-                    progress = (i + 1) / total_pages
-                    progress_bar.progress(progress)
-                    status_text.text(f"ページ {page_num}/{total_pages} を処理中...")
-                
-                # ページ処理
-                result = process_single_page(
-                    page_path, page_num, model_name, api_key, schema, 
-                    prompt, temperature, max_tokens
-                )
-                
-                page_results.append(result)
-                
-                # ページ状況をバッジ形式で表示
-                if progress_container:
-                    page_badges = []
-                    for j, res in enumerate(page_results):
-                        page_number = j + 1
-                        if res["status"] == "success":
-                            page_badges.append(f'<span class="page-badge page-success">P{page_number} ✓</span>')
-                        else:
-                            page_badges.append(f'<span class="page-badge page-error">P{page_number} ✗</span>')
-                    
-                    # 処理待ちのページ
-                    for k in range(len(page_results), total_pages):
-                        page_number = k + 1
-                        if k == len(page_results):  # 現在処理中
-                            page_badges.append(f'<span class="page-badge page-processing">P{page_number} ...</span>')
-                        else:  # 待機中
-                            page_badges.append(f'<span class="page-badge">P{page_number}</span>')
-                    
-                    page_status_placeholder.markdown(
-                        f'<div style="margin: 10px 0;">{"".join(page_badges)}</div>', 
-                        unsafe_allow_html=True
-                    )
-        
-        finally:
-            # 一時ファイルの削除
-            for page_path in page_paths:
-                try:
-                    os.remove(page_path)
-                except:
-                    pass
-        
-        # 進捗完了
-        if progress_container:
-            progress_bar.progress(1.0)
-            status_text.text("全ページの処理が完了しました")
+        for i, chunk in enumerate(chunks):
+            if progress_container:
+                progress_bar.progress((i + 1) / total)
+                status_text.text(f"チャンク {chunk['id']}/{total} (P{chunk['start']}-{chunk['end']}) 処理中...")
             
-            # 最終的なページ状況を表示
-            final_badges = []
-            for res in page_results:
-                page_number = res["page_number"]
-                if res["status"] == "success":
-                    final_badges.append(f'<span class="page-badge page-success">P{page_number} ✓</span>')
-                else:
-                    final_badges.append(f'<span class="page-badge page-error" title="{res.get("error", "")}">P{page_number} ✗</span>')
+            result = process_chunk(chunk, model_name, api_key, schema, prompt, temperature, max_tokens)
+            results.append(result)
             
-            page_status_placeholder.markdown(
-                f'<div style="margin: 10px 0;">{"".join(final_badges)}</div>', 
-                unsafe_allow_html=True
-            )
+            # バッジ表示更新
+            if progress_container:
+                badges = []
+                for j, res in enumerate(results):
+                    pages = f"P{res['pages'][0]}-{res['pages'][-1]}"
+                    status_class = "page-success" if res["status"] == "success" else "page-error"
+                    symbol = "✓" if res["status"] == "success" else "✗"
+                    badges.append(f'<span class="page-badge {status_class}">C{res["id"]} ({pages}) {symbol}</span>')
+                
+                # 未処理チャンク
+                for k in range(len(results), total):
+                    chunk_info = chunks[k]
+                    pages = f"P{chunk_info['start']}-{chunk_info['end']}"
+                    class_name = "page-processing" if k == len(results) else ""
+                    symbol = "..." if k == len(results) else ""
+                    badges.append(f'<span class="page-badge {class_name}">C{chunk_info["id"]} ({pages}) {symbol}</span>')
+                
+                badge_container.markdown(f'<div>{"".join(badges)}</div>', unsafe_allow_html=True)
         
-        # 結果を統合
-        merged_result = merge_page_results(page_results)
-        
-        return merged_result
-        
-    except Exception as e:
-        return {"error": f"処理エラー: {str(e)}"}
+        if progress_container:
+            status_text.text("処理完了")
+    
+    finally:
+        # 一時ファイル削除
+        for chunk in chunks:
+            try:
+                os.remove(chunk["path"])
+            except:
+                pass
+    
+    return merge_chunks(results)
 
-# PDFファイルを一時ファイルとして保存する関数
-def save_upload_file(uploaded_file):
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-            tmp.write(uploaded_file.getbuffer())
-            return tmp.name
-    except Exception as e:
-        st.error(f"ファイル保存エラー: {str(e)}")
-        return None
-
-# タイトルと説明
-st.markdown('<div class="title-area">', unsafe_allow_html=True)
+# UI
 st.title("🧩 特許PDF構造化ツール")
-st.markdown("""
-特許PDFからマルチモーダル生成AIを使用して構造化JSONを抽出します。
-Gemini、GPT、Claudeなどの最新モデルを利用して特許データを解析できます。
-**📄 ページ単位処理**: PDFを1ページずつ処理して結果を統合します。
-""")
-st.markdown('</div>', unsafe_allow_html=True)
+st.markdown("特許PDFからマルチモーダル生成AIを使用して構造化JSONを抽出します。")
 
-# サイドバー - 設定エリア
+# サイドバー
 with st.sidebar:
     st.header("⚙️ 設定")
     
-    # APIプロバイダーとモデル選択
-    provider = st.selectbox(
-        "AIプロバイダー（Google Geminiを推奨）",
-        options=list(DEFAULT_MODEL_OPTIONS.keys())
-    )
+    # プロバイダー選択
+    provider = st.selectbox("AIプロバイダー", list(DEFAULT_MODELS.keys()))
     
-    # APIキー入力（モデル一覧取得のために先に配置）
-    api_key = st.text_input(
-        f"{provider} APIキー",
-        value=get_api_key_from_env(provider),
-        type="password",
-        help="APIキーを入力してください。環境変数から自動的に取得することも可能です。"
-    )
+    # APIキー
+    api_key_env = {"Google Gemini": "GOOGLE_API_KEY", "OpenAI": "OPENAI_API_KEY", "Anthropic": "ANTHROPIC_API_KEY"}
+    api_key = st.text_input(f"{provider} APIキー", value=os.environ.get(api_key_env[provider], ""), type="password")
     
-    # モデル選択方法のラジオボタン
-    model_input_type = st.radio(
-        "モデル選択方法",
-        options=["利用可能なモデルから選択", "カスタムモデル名を入力"],
-        horizontal=True
-    )
+    # モデル選択
+    available_models = get_models(provider, api_key)
+    model_name = st.selectbox("モデル", available_models) if available_models else ""
     
-    if model_input_type == "利用可能なモデルから選択":
-        # 利用可能なモデルを取得
-        with st.spinner("利用可能なモデルを取得中..."):
-            available_models = get_models_with_cache(provider, api_key)
-        
-        if available_models:
-            # モデル一覧の情報表示
-            if api_key:
-                st.info(f"✅ {len(available_models)}個の利用可能なモデルを取得しました")
-            else:
-                st.info(f"ℹ️ デフォルトモデル一覧を表示中（APIキーを入力すると最新一覧を取得）")
-            
-            model_name = st.selectbox(
-                "モデル",
-                options=available_models,
-                help="APIから取得した利用可能なモデル一覧です"
-            )
-            
-            # モデル更新ボタン
-            if st.button("🔄 モデル一覧を更新", help="最新のモデル一覧を再取得します"):
-                st.cache_data.clear()  # キャッシュをクリア
-                st.rerun()  # アプリを再実行
-                
-        else:
-            st.error("利用可能なモデルを取得できませんでした。APIキーを確認してください。")
-            model_name = ""
-            
-    else:
-        # カスタムモデル名を直接入力
-        model_placeholder = get_model_prefix(provider) + "model-name"
-        model_name = st.text_input(
-            "モデル名",
-            placeholder=model_placeholder,
-            help=f"{provider}の任意のモデル名を入力してください（例: {model_placeholder}）"
-        )
-        
-        # モデル名の妥当性チェック
-        if model_name and not is_valid_model_name(model_name, provider):
-            st.warning(f"⚠️ 入力されたモデル名「{model_name}」は{provider}のモデルではない可能性があります。")
-        
-        # よく使われるモデルのヒント表示
-        with st.expander("💡 モデル名のヒント"):
-            if provider == "Google Gemini":
-                st.markdown("""
-                **Google Geminiモデル例:**
-                - `gemini-1.5-pro` - 高性能モデル
-                - `gemini-1.5-flash` - 高速モデル
-                - `gemini-2.0-flash-exp` - 実験的モデル
-                """)
-            elif provider == "OpenAI":
-                st.markdown("""
-                **OpenAIモデル例:**
-                - `gpt-4o` - 最新のマルチモーダルモデル
-                - `gpt-4-vision-preview` - ビジョン対応モデル
-                - `gpt-4-turbo` - 高速モデル
-                """)
-            elif provider == "Anthropic":
-                st.markdown("""
-                **Anthropicモデル例:**
-                - `claude-3-opus-20240229` - 最高性能モデル
-                - `claude-3-sonnet-20240229` - バランス型モデル
-                - `claude-3-haiku-20240307` - 高速モデル
-                - `claude-3-5-sonnet-20241022` - 最新Sonnetモデル
-                """)
-    
-    # モデル名が空の場合の警告
-    if model_input_type == "カスタムモデル名を入力" and not model_name:
-        st.error("モデル名を入力してください")
-    
-    # 選択されたモデルの情報表示
-    if model_name:
-        st.success(f"選択されたモデル: **{model_name}**")
-    
-    # スキーマタイプの選択
-    schema_type = st.radio(
-        "JSONスキーマ",
-        options=["デフォルトスキーマを使用", "カスタムスキーマをアップロード", "スキーマを直接入力"],
-        index=0
-    )
-    
+    # スキーマ
+    schema_type = st.radio("JSONスキーマ", ["デフォルト", "ファイル", "直接入力"])
     schema = {}
-    if schema_type == "カスタムスキーマをアップロード":
-        uploaded_schema = st.file_uploader(
-            "JSONスキーマファイル",
-            type=["json"],
-            help="JSONスキーマファイルをアップロードしてください"
-        )
+    
+    if schema_type == "ファイル":
+        uploaded_schema = st.file_uploader("JSONスキーマファイル", type=["json"])
         if uploaded_schema:
-            schema_content = uploaded_schema.getvalue().decode("utf-8")
-            schema = load_schema(file_content=schema_content)
-            if schema:
-                st.success("スキーマを読み込みました")
-    
-    elif schema_type == "スキーマを直接入力":
-        schema_text = st.text_area(
-            "JSONスキーマを入力",
-            height=200,
-            help="JSONスキーマを直接入力してください"
-        )
+            schema = load_schema(content=uploaded_schema.getvalue().decode("utf-8"))
+    elif schema_type == "直接入力":
+        schema_text = st.text_area("JSONスキーマ", height=150)
         if schema_text:
-            try:
-                schema = json.loads(schema_text)
-                st.success("スキーマの形式が正しいです")
-            except json.JSONDecodeError:
-                st.error("JSONの形式が正しくありません")
-    
-    else:  # デフォルトスキーマを使用
-        default_schema_path = "default_schema.json"
-        if os.path.exists(default_schema_path):
-            schema = load_schema(file_path=default_schema_path)
-            st.success("デフォルトスキーマを読み込みました")
-        else:
-            st.info("デフォルトスキーマが見つからないため、空のスキーマを使用します")
+            schema = load_schema(content=schema_text)
+    else:
+        schema = load_schema("default_schema.json")
     
     # 詳細設定
-    with st.expander("詳細設定", expanded=False):
-        custom_prompt = st.text_area(
-            "カスタムプロンプト",
-            value="",
-            height=100,
-            help="生成AIへのカスタム指示を入力できます"
-        )
+    with st.expander("詳細設定"):
+        prompt = st.text_area("カスタムプロンプト", height=80)
+        temperature = st.slider("Temperature", 0.0, 1.0, 0.1, 0.05)
+        max_tokens = st.number_input("最大トークン数", 1024, 65535, 32768, 1024)
         
-        temperature = st.slider(
-            "Temperature",
-            min_value=0.0,
-            max_value=1.0,
-            value=0.1,
-            step=0.05,
-            help="高い値: より多様な出力、低い値: より確定的な出力"
-        )
-        
-        max_tokens = st.number_input(
-            "最大トークン数",
-            min_value=1024,
-            max_value=65535,
-            value=32768,
-            step=1024,
-            help="生成AIが出力できる最大トークン数"
-        )
-    
-    # スキーマの詳細表示（オプション）
-    if schema and st.checkbox("スキーマ詳細を表示"):
-        st.json(schema)
+        st.markdown("### チャンク設定")
+        chunk_size = st.selectbox("チャンクサイズ", [1, 2, 3, 4, 5], index=1)
+        overlap = st.selectbox("重複サイズ", [0, 1, 2], index=1)
 
-# メインエリア - 2列レイアウト
-col1, col2 = st.columns([1, 1])
+# メイン
+col1, col2 = st.columns(2)
 
 with col1:
     st.header("📤 入力")
-    
-    # PDF アップロード
-    uploaded_pdf = st.file_uploader(
-        "特許PDFをアップロード",
-        type=["pdf"],
-        help="処理する特許PDFファイルをアップロードしてください"
-    )
+    uploaded_pdf = st.file_uploader("特許PDFをアップロード", type=["pdf"])
     
     if uploaded_pdf:
-        st.success(f"ファイル名: {uploaded_pdf.name}")
-        
-        # PDFの基本情報を表示
+        st.success(f"ファイル: {uploaded_pdf.name}")
         try:
-            # PDFを一時保存してページ数を取得
-            temp_pdf_path = save_upload_file(uploaded_pdf)
-            if temp_pdf_path:
-                reader = PdfReader(temp_pdf_path)
-                page_count = len(reader.pages)
-                os.remove(temp_pdf_path)
-                
-                st.info(f"📄 総ページ数: {page_count} ページ")
-                st.info("🔄 このファイルは1ページずつ処理されます")
-        except Exception as e:
-            st.warning(f"PDFの情報取得に失敗: {str(e)}")
-        
-        # PDFの表示
-        with st.expander("PDFプレビュー", expanded=False):
-            pdf_display = f'<iframe src="data:application/pdf;base64,{uploaded_pdf.getvalue().hex()}" width="100%" height="500" type="application/pdf"></iframe>'
-            st.markdown(pdf_display, unsafe_allow_html=True)
+            temp_path = tempfile.mktemp(suffix=".pdf")
+            with open(temp_path, "wb") as f:
+                f.write(uploaded_pdf.getbuffer())
+            
+            reader = PdfReader(temp_path)
+            st.info(f"📄 総ページ数: {len(reader.pages)}")
+            os.remove(temp_path)
+        except:
+            pass
     
-    # 処理ボタン
-    process_button = st.button(
-        "ページ単位で処理開始",
-        disabled=not (uploaded_pdf and api_key and model_name),
-        help="特許PDFを1ページずつ処理して構造化JSONを生成します"
-    )
+    process_button = st.button("処理開始", disabled=not (uploaded_pdf and api_key and model_name))
 
 with col2:
     st.header("📥 出力")
     
-    # PDFを処理
     if process_button and uploaded_pdf and api_key and model_name:
-        with st.status("ページ単位で処理中...", expanded=True) as status:
-            # アップロードされたPDFを一時ファイルとして保存
-            pdf_path = save_upload_file(uploaded_pdf)
+        with st.status("処理中...", expanded=True) as status:
+            # PDF保存
+            pdf_path = tempfile.mktemp(suffix=".pdf")
+            with open(pdf_path, "wb") as f:
+                f.write(uploaded_pdf.getbuffer())
             
-            if pdf_path:
-                # 進捗表示用のコンテナ
-                progress_container = st.container()
+            # 処理実行
+            progress_container = st.container()
+            result = process_pdf(pdf_path, model_name, api_key, schema, prompt, 
+                               temperature, max_tokens, chunk_size, overlap, progress_container)
+            
+            # 後処理
+            os.remove(pdf_path)
+            
+            if "error" in result:
+                status.update(label=f"エラー: {result['error']}", state="error")
+            else:
+                status.update(label="処理完了", state="complete")
                 
-                # ページ単位で処理
-                result = process_pdf_by_pages(
-                    pdf_path=pdf_path,
-                    model_name=model_name,
-                    api_key=api_key,
-                    schema=schema,
-                    prompt=custom_prompt if custom_prompt else None,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    progress_container=progress_container
-                )
+                # 統計表示
+                summary = result.get("processing_summary", {})
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.markdown(f'<div class="stat-box blue-stat"><h3>{summary.get("total_chunks", 0)}</h3>総チャンク</div>', unsafe_allow_html=True)
+                with col2:
+                    st.markdown(f'<div class="stat-box green-stat"><h3>{summary.get("successful_chunks", 0)}</h3>成功</div>', unsafe_allow_html=True)
+                with col3:
+                    st.markdown(f'<div class="stat-box orange-stat"><h3>{summary.get("failed_chunks", 0)}</h3>失敗</div>', unsafe_allow_html=True)
                 
-                # 処理完了
-                if "error" in result:
-                    status.update(label=f"エラー: {result['error']}", state="error")
-                else:
-                    status.update(label="全ページの処理完了！", state="complete")
-                    
-                    # 処理結果の統計情報
-                    processing_summary = result.get("processing_summary", {})
-                    total_pages = processing_summary.get("total_pages", 0)
-                    successful_pages = processing_summary.get("successful_pages", 0)
-                    failed_pages = processing_summary.get("failed_pages", 0)
-                    
-                    # 統計情報の表示
-                    st.markdown("### 処理結果概要")
-                    col_stats1, col_stats2, col_stats3 = st.columns(3)
-                    with col_stats1:
-                        st.markdown(f'<div class="stat-box blue-stat"><h3>{total_pages}</h3>総ページ数</div>', unsafe_allow_html=True)
-                    with col_stats2:
-                        st.markdown(f'<div class="stat-box green-stat"><h3>{successful_pages}</h3>成功ページ</div>', unsafe_allow_html=True)
-                    with col_stats3:
-                        st.markdown(f'<div class="stat-box orange-stat"><h3>{failed_pages}</h3>失敗ページ</div>', unsafe_allow_html=True)
-                    
-                    # 処理詳細の表示
-                    if processing_summary.get("page_details"):
-                        st.markdown("### ページ別処理詳細")
-                        
-                        # 成功と失敗を分けて表示
-                        success_pages = [d for d in processing_summary["page_details"] if d["status"] == "success"]
-                        error_pages = [d for d in processing_summary["page_details"] if d["status"] == "error"]
-                        
-                        if success_pages:
-                            st.success(f"✅ 成功ページ: {', '.join([str(d['page_number']) for d in success_pages])}")
-                        
-                        if error_pages:
-                            st.error("❌ 失敗ページ:")
-                            for detail in error_pages:
-                                st.error(f"  • ページ {detail['page_number']}: {detail.get('error', '不明なエラー')}")
-                    
-                    # 統合された構造化データのキー数
-                    data_keys = [k for k in result.keys() if k != "processing_summary"]
-                    sections_count = sum(1 for k in data_keys if isinstance(result[k], dict))
-                    
-                    st.markdown("### 抽出データ概要")
-                    col_data1, col_data2 = st.columns(2)
-                    with col_data1:
-                        st.markdown(f'<div class="stat-box blue-stat"><h3>{len(data_keys)}</h3>データ要素</div>', unsafe_allow_html=True)
-                    with col_data2:
-                        st.markdown(f'<div class="stat-box green-stat"><h3>{sections_count}</h3>セクション数</div>', unsafe_allow_html=True)
-                    
-                    # 統合結果の表示（processing_summaryを除く）
-                    display_result = {k: v for k, v in result.items() if k != "processing_summary"}
-                    
-                    # JSON結果の表示
-                    st.markdown("### 統合JSON出力")
-                    st.json(display_result)
-                    
-                    # ダウンロードボタン
-                    json_str = json.dumps(result, ensure_ascii=False, indent=2)
-                    output_filename = f"{Path(uploaded_pdf.name).stem}_merged.json"
-                    
-                    col_download1, col_download2 = st.columns(2)
-                    with col_download1:
-                        st.download_button(
-                            label="📥 統合JSONをダウンロード",
-                            data=json_str.encode("utf-8"),
-                            file_name=output_filename,
-                            mime="application/json",
-                            help="ページ別処理結果を統合したJSONファイルをダウンロードします"
-                        )
-                    
-                    with col_download2:
-                        # データのみ（処理情報を除く）のダウンロード
-                        clean_json_str = json.dumps(display_result, ensure_ascii=False, indent=2)
-                        clean_filename = f"{Path(uploaded_pdf.name).stem}_data_only.json"
-                        st.download_button(
-                            label="📄 データのみダウンロード",
-                            data=clean_json_str.encode("utf-8"),
-                            file_name=clean_filename,
-                            mime="application/json",
-                            help="処理情報を除いた構造化データのみをダウンロードします"
-                        )
+                # 結果表示
+                display_data = {k: v for k, v in result.items() if k != "processing_summary"}
+                st.markdown("### JSON出力")
+                st.json(display_data)
                 
-                # 一時ファイルの削除
-                try:
-                    os.remove(pdf_path)
-                except:
-                    pass
+                # ダウンロード
+                json_str = json.dumps(result, ensure_ascii=False, indent=2)
+                filename = f"{Path(uploaded_pdf.name).stem}_processed.json"
+                st.download_button("📥 JSONダウンロード", json_str.encode("utf-8"), filename, "application/json")
     else:
-        # 処理前のプレースホルダー
-        st.info("PDFをアップロードして「ページ単位で処理開始」ボタンをクリックすると、ここに統合された構造化JSONが表示されます")
-        
-        # デモ表示（オプション）
-        st.markdown("### 📋 出力例")
-        if st.checkbox("出力例を表示", key="show_example"):
-            example_output = {
-                "processing_summary": {
-                    "total_pages": 10,
-                    "successful_pages": 9,
-                    "failed_pages": 1,
-                    "page_details": [
-                        {"page_number": 1, "status": "success"},
-                        {"page_number": 2, "status": "success"},
-                        {"page_number": 3, "status": "error", "error": "画像が不鮮明"},
-                        {"page_number": 4, "status": "success"}
-                    ]
-                },
-                "publicationIdentifier": "WO2020123456A1",
-                "FrontPage": {
-                    "title": "AI駆動特許データ抽出システム",
-                    "PublicationData": {
-                        "PublicationNumber": "WO2020123456A1",
-                        "PublicationDate": "2020-06-15",
-                        "PublicationKind": "A1"
-                    },
-                    "Applicants": {"Applicant": [{"Name": "サンプル株式会社"}]},
-                    "Inventors": {"Inventor": [{"Name": "発明 太郎"}]},
-                    "Abstract": {"Paragraph": [{"content": "これは特許の要約サンプルです..."}]}
-                },
-                "Claims": {
-                    "Claim": [
-                        {"id": "claim1", "number": 1, "Text": {"content": "AIを使用して特許文書から構造化データを抽出する方法..."}},
-                        {"id": "claim2", "number": 2, "Text": {"content": "請求項1に記載の方法において..."}}
-                    ]
-                },
-                "Description": {
-                    "TechnicalField": {"Paragraph": [{"content": "本発明は、特許文書処理の分野に関する..."}]},
-                    "BackgroundArt": {"Paragraph": [{"content": "従来の特許文書処理では..."}]},
-                    "SummaryOfInvention": {"Paragraph": [{"content": "本発明の目的は..."}]}
-                }
-            }
-            st.json(example_output)
+        st.info("PDFをアップロードして処理を開始してください")
 
-# フッター
 st.markdown("---")
-
-# 処理方法の説明
-with st.expander("📖 ページ単位処理について", expanded=False):
-    st.markdown("""
-    ### 🔄 ページ単位処理の特徴
-    
-    **処理フロー:**
-    1. **PDF分割**: アップロードされたPDFを1ページずつ分割（pypdfライブラリ使用）
-    2. **個別処理**: 各ページを独立してAIモデルで解析
-    3. **リアルタイム進捗**: 各ページの処理状況をリアルタイムで表示
-    4. **結果統合**: 全ページの処理結果を統合してひとつのJSONを生成
-    5. **エラー耐性**: 一部のページでエラーが発生しても他のページの処理を継続
-    
-    **利点:**
-    - 📊 **進捗の可視化**: どのページまで処理が完了したかリアルタイムで確認
-    - 🛡️ **エラー耐性**: 一部ページの失敗が全体に影響しない
-    - 🔧 **柔軟な統合**: 複数ページのデータを適切に結合
-    - 💾 **メモリ効率**: 大きなPDFも効率的に処理
-    
-    **統合ルール:**
-    - 📝 **基本情報**: 最初に見つかった値を使用（公開番号等）
-    - 📚 **配列データ**: 全ページのデータを結合（請求項、段落等）
-    - 🏗️ **構造化データ**: 辞書は再帰的にマージ
-    - ⚠️ **エラー情報**: 処理概要に失敗ページの詳細を記録
-    """)
-
 st.markdown("""
 <div style="text-align: center; color: #666;">
-    特許PDF構造化ツール - マルチモーダル生成AIを使用した特許文書の構造化データ抽出<br>
-    <small>Powered by patent-extractor library Copyright (c) 2025 Pyxist Co.,Ltd</small><br>
-    <small>🔄 ページ単位処理機能搭載 - pypdf (MIT License) を使用した安定したPDF処理</small>
+特許PDF構造化ツール - チャンク重複処理によるAI文書解析<br>
+<small>Powered by patent-extractor library</small>
 </div>
 """, unsafe_allow_html=True)
