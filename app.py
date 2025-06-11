@@ -245,36 +245,221 @@ def merge_chunks_with_safety_handling(chunk_results):
     return result
 
 def clean_json_response(response):
-    """AIレスポンスのJSONクリーニング"""
+    """AIレスポンスのJSONクリーニング（強化版）"""
     if isinstance(response, dict):
         return response  # 既にパース済みの場合
     
-    if isinstance(response, str):
-        try:
-            # 基本的なJSONクリーニング
-            cleaned = response.strip()
-            
-            # マークダウンコードブロックの除去
-            if cleaned.startswith('```json'):
-                cleaned = cleaned[7:]
-            if cleaned.startswith('```'):
-                cleaned = cleaned[3:]
-            if cleaned.endswith('```'):
-                cleaned = cleaned[:-3]
-            
-            # 前後の空白除去
-            cleaned = cleaned.strip()
-            
-            # JSONとして解析
-            parsed = json.loads(cleaned)
-            return parsed
-            
-        except json.JSONDecodeError:
-            # JSONパースに失敗した場合は空の辞書を返す
-            st.warning(f"JSON解析に失敗しました。空のデータを返します。")
-            return {}
+    if not response:
+        return {}
     
-    return response or {}
+    try:
+        # レスポンスを文字列に変換
+        response_str = str(response).strip()
+        
+        # 空の場合
+        if not response_str:
+            return {}
+        
+        # マークダウンコードブロックの除去
+        patterns_to_remove = [
+            r'```json\s*',
+            r'```\s*',
+            r'^\s*json\s*',
+            r'`+',
+        ]
+        
+        for pattern in patterns_to_remove:
+            response_str = re.sub(pattern, '', response_str, flags=re.IGNORECASE | re.MULTILINE)
+        
+        response_str = response_str.strip()
+        
+        # JSONではない説明文の除去
+        lines = response_str.split('\n')
+        json_lines = []
+        json_started = False
+        
+        for line in lines:
+            stripped_line = line.strip()
+            if stripped_line.startswith('{') or stripped_line.startswith('['):
+                json_started = True
+            if json_started:
+                json_lines.append(line)
+            if json_started and (stripped_line.endswith('}') or stripped_line.endswith(']')):
+                break
+        
+        if json_lines:
+            response_str = '\n'.join(json_lines)
+        
+        # 不正な文字の修正
+        response_str = fix_json_syntax(response_str)
+        
+        # JSONとして解析
+        try:
+            parsed = json.loads(response_str)
+            return parsed
+        except json.JSONDecodeError:
+            # 部分的なJSONの修復を試行
+            repaired = repair_partial_json(response_str)
+            if repaired:
+                return json.loads(repaired)
+            
+            # それでも失敗した場合は基本構造を返す
+            return create_basic_structure_from_text(response_str)
+            
+    except Exception as e:
+        st.warning(f"JSONクリーニングエラー: {e}")
+        return {}
+
+def fix_json_syntax(text):
+    """JSON構文の修正"""
+    import re
+    
+    # 一般的なJSON構文エラーの修正
+    fixes = [
+        # 末尾のカンマ除去
+        (r',(\s*[}\]])', r'\1'),
+        # 不正なクォート修正
+        (r'([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'\1"\2":'),
+        # 単一クォートをダブルクォートに
+        (r"'([^']*)'", r'"\1"'),
+        # 制御文字の除去
+        (r'[\x00-\x1f\x7f-\x9f]', ''),
+        # 不正な改行の修正
+        (r'"\s*\n\s*"', r'""'),
+    ]
+    
+    result = text
+    for pattern, replacement in fixes:
+        result = re.sub(pattern, replacement, result, flags=re.MULTILINE)
+    
+    return result
+
+def repair_partial_json(text):
+    """部分的なJSONの修復"""
+    try:
+        # 不完全なJSONを完成させる試行
+        text = text.strip()
+        
+        # 開始文字チェック
+        if not text.startswith(('{', '[')):
+            return None
+        
+        # 対応する括弧の数をチェック
+        open_braces = text.count('{')
+        close_braces = text.count('}')
+        open_brackets = text.count('[')
+        close_brackets = text.count(']')
+        
+        # 不足している閉じ括弧を追加
+        if open_braces > close_braces:
+            text += '}' * (open_braces - close_braces)
+        
+        if open_brackets > close_brackets:
+            text += ']' * (open_brackets - close_brackets)
+        
+        # 末尾のカンマや不完全な要素を修正
+        text = re.sub(r',\s*([}\]])', r'\1', text)
+        text = re.sub(r':\s*([,}\]])', r': null\1', text)
+        
+        return text
+    except:
+        return None
+
+def create_basic_structure_from_text(text):
+    """テキストから基本的なJSON構造を作成"""
+    try:
+        # テキストから基本的な情報を抽出
+        result = {
+            "error": "JSON解析に失敗したため基本構造を作成",
+            "raw_content": text[:500] + "..." if len(text) > 500 else text,
+            "extraction_method": "fallback"
+        }
+        
+        # 可能であれば一些基本情報を抽出
+        lines = text.split('\n')
+        for line in lines:
+            # 特許番号らしき文字列を検索
+            if 'JP' in line and any(c.isdigit() for c in line):
+                result["possible_patent_number"] = line.strip()
+                break
+        
+        return result
+    except:
+        return {"error": "完全なJSON解析失敗"}
+
+def process_chunk(chunk, model_name, api_key, schema, prompt=None, temperature=0.1, max_tokens=32768):
+    """チャンクを処理（JSONパース問題の根本解決）"""
+    try:
+        # より確実なJSON出力を促すプロンプト
+        robust_prompt = f"""
+        あなたは特許文書解析の専門家です。以下の特許文書から情報を抽出し、有効なJSONフォーマットで出力してください。
+
+        重要なルール:
+        1. 出力は必ず有効なJSONオブジェクトで始まり、JSONオブジェクトで終わること
+        2. 文字列値内の改行は \\n で表現すること
+        3. ダブルクォートは \\" でエスケープすること
+        4. 説明やコメントは含めず、JSONデータのみを出力すること
+        5. 不明な項目は null または空文字列を使用すること
+
+        出力例:
+        {{
+            "title": "発明の名称",
+            "publication_number": "特許番号",
+            "abstract": "要約文"
+        }}
+
+        {prompt or ""}
+        
+        必ずJSONフォーマットで出力してください:
+        """
+        
+        extractor = PatentExtractor(model_name, api_key, schema, robust_prompt, temperature, max_tokens)
+        
+        # より低い温度設定で確定的な出力を促す
+        safe_temperature = min(0.0, temperature)
+        extractor.temperature = safe_temperature
+        
+        raw_result = extractor.process_patent_pdf(chunk["path"])
+        
+        # レスポンスの詳細ログ（デバッグ用）
+        if isinstance(raw_result, str):
+            st.write(f"デバッグ: チャンク{chunk['id']}の生レスポンス（最初の200文字）: {str(raw_result)[:200]}...")
+        
+        # レスポンスの安全性チェック
+        if raw_result is None:
+            return create_error_result(chunk, "空のレスポンス")
+        
+        # JSONクリーニングと解析
+        cleaned_result = clean_json_response(raw_result)
+        
+        if not cleaned_result or cleaned_result == {}:
+            return create_error_result(chunk, "JSONクリーニング失敗")
+        
+        return {"id": chunk["id"], "pages": chunk["pages"], "status": "success", "data": cleaned_result}
+        
+    except Exception as e:
+        error_msg = str(e)
+        st.error(f"チャンク{chunk['id']}処理エラー: {error_msg}")
+        return create_error_result(chunk, error_msg)
+
+def create_error_result(chunk, error_msg):
+    """エラー時の結果作成"""
+    return {
+        "id": chunk["id"], 
+        "pages": chunk["pages"], 
+        "status": "error", 
+        "error": error_msg, 
+        "data": {
+            "error_info": {
+                "chunk_id": chunk["id"],
+                "pages": chunk["pages"],
+                "error_message": error_msg
+            }
+        }
+    }
+
+# 正規表現ライブラリのインポート
+import re
 
 def safe_json_dumps(obj, **kwargs):
     """安全なJSON文字列化"""
