@@ -3,6 +3,8 @@ import json
 import os
 import tempfile
 from pathlib import Path
+from pypdf import PdfReader, PdfWriter
+from typing import Dict, List, Any
 
 from patent_extractor import PatentExtractor
 
@@ -45,9 +47,28 @@ st.markdown("""
         background-color: #f0fff5;
         border: 1px solid #d0ffe0;
     }
+    .orange-stat {
+        background-color: #fff5f0;
+        border: 1px solid #ffe0d0;
+    }
     .title-area {
         text-align: center;
         margin-bottom: 2rem;
+    }
+    .page-progress {
+        margin: 10px 0;
+        padding: 10px;
+        border-radius: 5px;
+        background-color: #f8f9fa;
+        border-left: 4px solid #007bff;
+    }
+    .error-page {
+        background-color: #fff5f5;
+        border-left: 4px solid #dc3545;
+    }
+    .success-page {
+        background-color: #f0fff4;
+        border-left: 4px solid #28a745;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -165,8 +186,35 @@ def load_schema(file_path=None, file_content=None):
         st.error(f"JSONスキーマの読み込みエラー: {str(e)}")
         return {}
 
-# PDFを処理する関数
-def process_pdf(pdf_path, model_name, api_key, schema, prompt=None, temperature=0.1, max_tokens=4096):
+# PDFを1ページずつ分割して処理する関数
+def split_pdf_to_pages(pdf_path: str) -> List[str]:
+    """PDFを1ページずつ分割して一時ファイルのパスリストを返す"""
+    page_paths = []
+    try:
+        reader = PdfReader(pdf_path)
+        
+        for page_num in range(len(reader.pages)):
+            # 新しいPDFライターを作成
+            writer = PdfWriter()
+            writer.add_page(reader.pages[page_num])
+            
+            # 一時ファイルとして保存
+            temp_path = tempfile.mktemp(suffix=f"_page_{page_num + 1}.pdf")
+            with open(temp_path, "wb") as output_file:
+                writer.write(output_file)
+            
+            page_paths.append(temp_path)
+        
+        return page_paths
+    except Exception as e:
+        st.error(f"PDF分割エラー: {str(e)}")
+        return []
+
+# 1ページのPDFを処理する関数
+def process_single_page(page_path: str, page_num: int, model_name: str, api_key: str, 
+                       schema: Dict, prompt: str = None, temperature: float = 0.1, 
+                       max_tokens: int = 4096) -> Dict:
+    """1ページのPDFを処理"""
     try:
         extractor = PatentExtractor(
             model_name=model_name,
@@ -176,10 +224,161 @@ def process_pdf(pdf_path, model_name, api_key, schema, prompt=None, temperature=
             temperature=temperature,
             max_tokens=max_tokens
         )
-        return extractor.process_patent_pdf(pdf_path)
+        result = extractor.process_patent_pdf(page_path)
+        return {
+            "page_number": page_num,
+            "status": "success",
+            "data": result
+        }
     except Exception as e:
-        st.error(f"処理エラー: {str(e)}")
-        return {"error": str(e)}
+        return {
+            "page_number": page_num,
+            "status": "error",
+            "error": str(e),
+            "data": {}
+        }
+
+# 複数ページの結果を統合する関数
+def merge_page_results(page_results: List[Dict]) -> Dict:
+    """複数ページの結果を統合してひとつのJSONを作成"""
+    merged_result = {
+        "processing_summary": {
+            "total_pages": len(page_results),
+            "successful_pages": sum(1 for r in page_results if r["status"] == "success"),
+            "failed_pages": sum(1 for r in page_results if r["status"] == "error"),
+            "page_details": []
+        }
+    }
+    
+    # 各ページの詳細を記録
+    for result in page_results:
+        page_detail = {
+            "page_number": result["page_number"],
+            "status": result["status"]
+        }
+        if result["status"] == "error":
+            page_detail["error"] = result["error"]
+        merged_result["processing_summary"]["page_details"].append(page_detail)
+    
+    # 成功したページのデータを統合
+    successful_results = [r["data"] for r in page_results if r["status"] == "success"]
+    
+    if not successful_results:
+        merged_result["error"] = "すべてのページで処理に失敗しました"
+        return merged_result
+    
+    # 基本的な統合戦略
+    # 1. publicationIdentifierは最初に見つかったものを使用
+    # 2. セクションは配列として統合
+    # 3. 単一値は最初に見つかったものを使用
+    
+    for i, result in enumerate(successful_results):
+        if i == 0:
+            # 最初の結果をベースとして使用
+            for key, value in result.items():
+                if key not in merged_result:
+                    merged_result[key] = value
+        else:
+            # 後続の結果をマージ
+            for key, value in result.items():
+                if key in merged_result:
+                    # 既存のキーがある場合の統合ロジック
+                    if isinstance(merged_result[key], dict) and isinstance(value, dict):
+                        # 辞書の場合は再帰的にマージ
+                        merged_result[key] = merge_dict_values(merged_result[key], value)
+                    elif isinstance(merged_result[key], list) and isinstance(value, list):
+                        # リストの場合は結合
+                        merged_result[key].extend(value)
+                    # 単一値の場合は最初の値を保持（上書きしない）
+                else:
+                    # 新しいキーの場合は追加
+                    merged_result[key] = value
+    
+    return merged_result
+
+def merge_dict_values(dict1: Dict, dict2: Dict) -> Dict:
+    """辞書の値を再帰的にマージ"""
+    result = dict1.copy()
+    
+    for key, value in dict2.items():
+        if key in result:
+            if isinstance(result[key], dict) and isinstance(value, dict):
+                result[key] = merge_dict_values(result[key], value)
+            elif isinstance(result[key], list) and isinstance(value, list):
+                result[key].extend(value)
+            # 単一値の場合は最初の値を保持
+        else:
+            result[key] = value
+    
+    return result
+
+# ページ単位でPDFを処理する関数
+def process_pdf_by_pages(pdf_path: str, model_name: str, api_key: str, schema: Dict, 
+                        prompt: str = None, temperature: float = 0.1, 
+                        max_tokens: int = 4096, progress_container=None) -> Dict:
+    """PDFを1ページずつ処理して結果を統合"""
+    try:
+        # PDFを1ページずつ分割
+        page_paths = split_pdf_to_pages(pdf_path)
+        
+        if not page_paths:
+            return {"error": "PDFの分割に失敗しました"}
+        
+        total_pages = len(page_paths)
+        page_results = []
+        
+        # 進捗表示用のコンテナ
+        if progress_container:
+            progress_bar = progress_container.progress(0)
+            status_text = progress_container.empty()
+        
+        try:
+            # 各ページを処理
+            for i, page_path in enumerate(page_paths):
+                page_num = i + 1
+                
+                # 進捗更新
+                if progress_container:
+                    progress = (i + 1) / total_pages
+                    progress_bar.progress(progress)
+                    status_text.text(f"ページ {page_num}/{total_pages} を処理中...")
+                
+                # ページ処理
+                result = process_single_page(
+                    page_path, page_num, model_name, api_key, schema, 
+                    prompt, temperature, max_tokens
+                )
+                
+                page_results.append(result)
+                
+                # 進捗表示の更新
+                if progress_container:
+                    with progress_container:
+                        if result["status"] == "success":
+                            st.markdown(f'<div class="page-progress success-page">✅ ページ {page_num}: 処理完了</div>', unsafe_allow_html=True)
+                        else:
+                            st.markdown(f'<div class="page-progress error-page">❌ ページ {page_num}: エラー - {result["error"]}</div>', unsafe_allow_html=True)
+        
+        finally:
+            # 一時ファイルの削除
+            for page_path in page_paths:
+                try:
+                    os.remove(page_path)
+                except:
+                    pass
+        
+        # 進捗完了
+        if progress_container:
+            progress_bar.progress(1.0)
+            status_text.text("全ページの処理が完了しました")
+        
+        # 結果を統合
+        merged_result = merge_page_results(page_results)
+        
+        return merged_result
+        
+    except Exception as e:
+        return {"error": f"処理エラー: {str(e)}"}
 
 # PDFファイルを一時ファイルとして保存する関数
 def save_upload_file(uploaded_file):
@@ -197,6 +396,7 @@ st.title("🧩 特許PDF構造化ツール")
 st.markdown("""
 特許PDFからマルチモーダル生成AIを使用して構造化JSONを抽出します。
 Gemini、GPT、Claudeなどの最新モデルを利用して特許データを解析できます。
+**📄 ページ単位処理**: PDFを1ページずつ処理して結果を統合します。
 """)
 st.markdown('</div>', unsafe_allow_html=True)
 
@@ -298,8 +498,6 @@ with st.sidebar:
     if model_name:
         st.success(f"選択されたモデル: **{model_name}**")
     
-    # APIキー入力（上で移動済みのため削除）
-    
     # スキーマタイプの選択
     schema_type = st.radio(
         "JSONスキーマ",
@@ -388,6 +586,20 @@ with col1:
     if uploaded_pdf:
         st.success(f"ファイル名: {uploaded_pdf.name}")
         
+        # PDFの基本情報を表示
+        try:
+            # PDFを一時保存してページ数を取得
+            temp_pdf_path = save_upload_file(uploaded_pdf)
+            if temp_pdf_path:
+                reader = PdfReader(temp_pdf_path)
+                page_count = len(reader.pages)
+                os.remove(temp_pdf_path)
+                
+                st.info(f"📄 総ページ数: {page_count} ページ")
+                st.info("🔄 このファイルは1ページずつ処理されます")
+        except Exception as e:
+            st.warning(f"PDFの情報取得に失敗: {str(e)}")
+        
         # PDFの表示
         with st.expander("PDFプレビュー", expanded=False):
             pdf_display = f'<iframe src="data:application/pdf;base64,{uploaded_pdf.getvalue().hex()}" width="100%" height="500" type="application/pdf"></iframe>'
@@ -395,9 +607,9 @@ with col1:
     
     # 処理ボタン
     process_button = st.button(
-        "処理開始",
+        "ページ単位で処理開始",
         disabled=not (uploaded_pdf and api_key and model_name),
-        help="特許PDFを処理して構造化JSONを生成します"
+        help="特許PDFを1ページずつ処理して構造化JSONを生成します"
     )
 
 with col2:
@@ -405,58 +617,99 @@ with col2:
     
     # PDFを処理
     if process_button and uploaded_pdf and api_key and model_name:
-        with st.status("処理中...", expanded=True) as status:
+        with st.status("ページ単位で処理中...", expanded=True) as status:
             # アップロードされたPDFを一時ファイルとして保存
             pdf_path = save_upload_file(uploaded_pdf)
             
             if pdf_path:
-                with st.spinner(f"{model_name} で処理中..."):
-                    # 処理開始
-                    result = process_pdf(
-                        pdf_path=pdf_path,
-                        model_name=model_name,
-                        api_key=api_key,
-                        schema=schema,
-                        prompt=custom_prompt if custom_prompt else None,
-                        temperature=temperature,
-                        max_tokens=max_tokens
-                    )
+                # 進捗表示用のコンテナ
+                progress_container = st.container()
+                
+                # ページ単位で処理
+                result = process_pdf_by_pages(
+                    pdf_path=pdf_path,
+                    model_name=model_name,
+                    api_key=api_key,
+                    schema=schema,
+                    prompt=custom_prompt if custom_prompt else None,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    progress_container=progress_container
+                )
+                
+                # 処理完了
+                if "error" in result:
+                    status.update(label=f"エラー: {result['error']}", state="error")
+                else:
+                    status.update(label="全ページの処理完了！", state="complete")
                     
-                    # 処理完了
-                    if "error" in result:
-                        status.update(label=f"エラー: {result['error']}", state="error")
-                    else:
-                        status.update(label="処理完了！", state="complete")
-                        
-                        # 結果の統計情報
-                        sections_count = 0
-                        keys_count = len(result.keys())
-                        for key, value in result.items():
-                            if isinstance(value, dict):
-                                sections_count += 1
-                        
-                        # 統計情報の表示
-                        st.markdown("### 抽出結果概要")
-                        col_stats1, col_stats2 = st.columns(2)
-                        with col_stats1:
-                            st.markdown(f'<div class="stat-box blue-stat"><h3>{keys_count}</h3>トップレベル要素</div>', unsafe_allow_html=True)
-                        with col_stats2:
-                            st.markdown(f'<div class="stat-box green-stat"><h3>{sections_count}</h3>セクション数</div>', unsafe_allow_html=True)
-                        
-                        # JSON結果の表示
-                        st.markdown("### JSON出力")
-                        st.json(result)
-                        
-                        # ダウンロードボタン
-                        json_str = json.dumps(result, ensure_ascii=False)
-                        output_filename = f"{Path(uploaded_pdf.name).stem}.json"
-                        
+                    # 処理結果の統計情報
+                    processing_summary = result.get("processing_summary", {})
+                    total_pages = processing_summary.get("total_pages", 0)
+                    successful_pages = processing_summary.get("successful_pages", 0)
+                    failed_pages = processing_summary.get("failed_pages", 0)
+                    
+                    # 統計情報の表示
+                    st.markdown("### 処理結果概要")
+                    col_stats1, col_stats2, col_stats3 = st.columns(3)
+                    with col_stats1:
+                        st.markdown(f'<div class="stat-box blue-stat"><h3>{total_pages}</h3>総ページ数</div>', unsafe_allow_html=True)
+                    with col_stats2:
+                        st.markdown(f'<div class="stat-box green-stat"><h3>{successful_pages}</h3>成功ページ</div>', unsafe_allow_html=True)
+                    with col_stats3:
+                        st.markdown(f'<div class="stat-box orange-stat"><h3>{failed_pages}</h3>失敗ページ</div>', unsafe_allow_html=True)
+                    
+                    # 処理詳細の表示
+                    if processing_summary.get("page_details"):
+                        with st.expander("ページ別処理詳細", expanded=False):
+                            for detail in processing_summary["page_details"]:
+                                if detail["status"] == "success":
+                                    st.success(f"ページ {detail['page_number']}: 処理成功")
+                                else:
+                                    st.error(f"ページ {detail['page_number']}: {detail.get('error', '不明なエラー')}")
+                    
+                    # 統合された構造化データのキー数
+                    data_keys = [k for k in result.keys() if k != "processing_summary"]
+                    sections_count = sum(1 for k in data_keys if isinstance(result[k], dict))
+                    
+                    st.markdown("### 抽出データ概要")
+                    col_data1, col_data2 = st.columns(2)
+                    with col_data1:
+                        st.markdown(f'<div class="stat-box blue-stat"><h3>{len(data_keys)}</h3>データ要素</div>', unsafe_allow_html=True)
+                    with col_data2:
+                        st.markdown(f'<div class="stat-box green-stat"><h3>{sections_count}</h3>セクション数</div>', unsafe_allow_html=True)
+                    
+                    # 統合結果の表示（processing_summaryを除く）
+                    display_result = {k: v for k, v in result.items() if k != "processing_summary"}
+                    
+                    # JSON結果の表示
+                    st.markdown("### 統合JSON出力")
+                    st.json(display_result)
+                    
+                    # ダウンロードボタン
+                    json_str = json.dumps(result, ensure_ascii=False, indent=2)
+                    output_filename = f"{Path(uploaded_pdf.name).stem}_merged.json"
+                    
+                    col_download1, col_download2 = st.columns(2)
+                    with col_download1:
                         st.download_button(
-                            label="JSONをダウンロード",
+                            label="📥 統合JSONをダウンロード",
                             data=json_str.encode("utf-8"),
                             file_name=output_filename,
                             mime="application/json",
-                            help="抽出された構造化データをJSONファイルとしてダウンロードします"
+                            help="ページ別処理結果を統合したJSONファイルをダウンロードします"
+                        )
+                    
+                    with col_download2:
+                        # データのみ（処理情報を除く）のダウンロード
+                        clean_json_str = json.dumps(display_result, ensure_ascii=False, indent=2)
+                        clean_filename = f"{Path(uploaded_pdf.name).stem}_data_only.json"
+                        st.download_button(
+                            label="📄 データのみダウンロード",
+                            data=clean_json_str.encode("utf-8"),
+                            file_name=clean_filename,
+                            mime="application/json",
+                            help="処理情報を除いた構造化データのみをダウンロードします"
                         )
                 
                 # 一時ファイルの削除
@@ -466,11 +719,22 @@ with col2:
                     pass
     else:
         # 処理前のプレースホルダー
-        st.info("PDFをアップロードして「処理開始」ボタンをクリックすると、ここに構造化JSONが表示されます")
+        st.info("PDFをアップロードして「ページ単位で処理開始」ボタンをクリックすると、ここに統合された構造化JSONが表示されます")
         
         # デモ表示（オプション）
         with st.expander("出力例"):
             example_output = {
+                "processing_summary": {
+                    "total_pages": 10,
+                    "successful_pages": 9,
+                    "failed_pages": 1,
+                    "page_details": [
+                        {"page_number": 1, "status": "success"},
+                        {"page_number": 2, "status": "success"},
+                        {"page_number": 3, "status": "error", "error": "画像が不鮮明"},
+                        {"page_number": 4, "status": "success"}
+                    ]
+                },
                 "publicationIdentifier": "WO2020123456A1",
                 "FrontPage": {
                     "title": "AI駆動特許データ抽出システム",
@@ -499,9 +763,36 @@ with col2:
 
 # フッター
 st.markdown("---")
+
+# 処理方法の説明
+with st.expander("📖 ページ単位処理について", expanded=False):
+    st.markdown("""
+    ### 🔄 ページ単位処理の特徴
+    
+    **処理フロー:**
+    1. **PDF分割**: アップロードされたPDFを1ページずつ分割（pypdfライブラリ使用）
+    2. **個別処理**: 各ページを独立してAIモデルで解析
+    3. **リアルタイム進捗**: 各ページの処理状況をリアルタイムで表示
+    4. **結果統合**: 全ページの処理結果を統合してひとつのJSONを生成
+    5. **エラー耐性**: 一部のページでエラーが発生しても他のページの処理を継続
+    
+    **利点:**
+    - 📊 **進捗の可視化**: どのページまで処理が完了したかリアルタイムで確認
+    - 🛡️ **エラー耐性**: 一部ページの失敗が全体に影響しない
+    - 🔧 **柔軟な統合**: 複数ページのデータを適切に結合
+    - 💾 **メモリ効率**: 大きなPDFも効率的に処理
+    
+    **統合ルール:**
+    - 📝 **基本情報**: 最初に見つかった値を使用（公開番号等）
+    - 📚 **配列データ**: 全ページのデータを結合（請求項、段落等）
+    - 🏗️ **構造化データ**: 辞書は再帰的にマージ
+    - ⚠️ **エラー情報**: 処理概要に失敗ページの詳細を記録
+    """)
+
 st.markdown("""
 <div style="text-align: center; color: #666;">
-    特許PDF構造化ツール - マルチモーダル生成AIを使用して特許文書から構造化情報を抽出します<br>
-    <small>Powered by patent-extractor library Copyright (c) 2025 Pyxist Co.,Ltd</small>
+    特許PDF構造化ツール - マルチモーダル生成AIを使用した特許文書の構造化データ抽出<br>
+    <small>Powered by patent-extractor library Copyright (c) 2025 Pyxist Co.,Ltd</small><br>
+    <small>🔄 ページ単位処理機能搭載 - pypdf (MIT License) を使用した安定したPDF処理</small>
 </div>
 """, unsafe_allow_html=True)
