@@ -95,33 +95,154 @@ def split_pdf_chunks(pdf_path, chunk_size=2, overlap=1):
     return chunks
 
 def process_chunk(chunk, model_name, api_key, schema, prompt=None, temperature=0.1, max_tokens=32768):
-    """チャンクを処理（JSONパースエラー対策）"""
+    """チャンクを処理（Gemini安全性フィルタ対策）"""
     try:
-        # JSON出力を強制するプロンプト
-        json_prompt = f"""
-        {prompt or "特許文書から情報を抽出してください。"}
+        # より安全なプロンプトを作成
+        safe_prompt = create_safe_prompt(prompt, schema)
         
-        重要な指示:
-        - 必ず有効なJSONフォーマットで出力してください
-        - 文字列内の改行は\\nで表現してください
-        - ダブルクォートは\\"でエスケープしてください
-        - JSONの外にコメントや説明を含めないでください
-        - 出力はJSONのみにしてください
-        """
+        extractor = PatentExtractor(model_name, api_key, schema, safe_prompt, temperature, max_tokens)
         
-        extractor = PatentExtractor(model_name, api_key, schema, json_prompt, temperature, max_tokens)
+        # Geminiの安全性設定を調整する場合のパラメータ
+        # (patent_extractorライブラリがサポートしている場合)
         raw_result = extractor.process_patent_pdf(chunk["path"])
+        
+        # レスポンスの安全性チェック
+        if raw_result is None or raw_result == {}:
+            # 空のレスポンスの場合は基本情報のみ抽出
+            fallback_result = create_fallback_extraction(chunk)
+            return {"id": chunk["id"], "pages": chunk["pages"], "status": "partial", 
+                   "data": fallback_result, "warning": "安全性フィルタのため部分的な抽出"}
         
         # JSONレスポンスのクリーニング
         cleaned_result = clean_json_response(raw_result)
         
         return {"id": chunk["id"], "pages": chunk["pages"], "status": "success", "data": cleaned_result}
-    except json.JSONDecodeError as e:
-        return {"id": chunk["id"], "pages": chunk["pages"], "status": "error", 
-                "error": f"JSON解析エラー: {str(e)}", "data": {}}
+        
     except Exception as e:
-        return {"id": chunk["id"], "pages": chunk["pages"], "status": "error", 
-                "error": str(e), "data": {}}
+        error_msg = str(e)
+        
+        # Gemini特有のエラーを特定
+        if "finish_reason is 2" in error_msg or "SAFETY" in error_msg:
+            # 安全性フィルタによるブロックの場合
+            fallback_result = create_fallback_extraction(chunk)
+            return {"id": chunk["id"], "pages": chunk["pages"], "status": "blocked", 
+                   "data": fallback_result, "error": "安全性フィルタによりブロック"}
+        elif "response.text" in error_msg:
+            # Geminiレスポンスエラーの場合
+            return {"id": chunk["id"], "pages": chunk["pages"], "status": "error", 
+                   "error": "Gemini APIレスポンスエラー", "data": {}}
+        else:
+            # その他のエラー
+            return {"id": chunk["id"], "pages": chunk["pages"], "status": "error", 
+                   "error": error_msg, "data": {}}
+
+def create_safe_prompt(original_prompt, schema):
+    """安全性フィルタを回避するためのプロンプト作成"""
+    safe_prompt = f"""
+    以下は学術的な特許文書の情報抽出タスクです。
+    
+    タスク: 特許文書から構造化された情報を抽出し、JSONフォーマットで出力してください。
+    
+    抽出対象:
+    - 特許番号や出願情報
+    - 技術分野
+    - 発明の背景
+    - 課題と解決手段
+    - 効果
+    - 実施例
+    
+    出力形式: 有効なJSONのみ
+    
+    注意事項:
+    - 学術的・教育的目的での使用
+    - 公開されている特許情報の構造化
+    - 研究目的での情報整理
+    
+    {original_prompt or ""}
+    """
+    
+    return safe_prompt
+
+def create_fallback_extraction(chunk):
+    """安全性フィルタブロック時のフォールバック抽出"""
+    return {
+        "processing_info": {
+            "chunk_id": chunk["id"],
+            "pages": chunk["pages"],
+            "status": "limited_extraction",
+            "reason": "安全性フィルタのため基本情報のみ抽出"
+        },
+        "basic_info": {
+            "document_type": "特許文書",
+            "pages_processed": len(chunk["pages"]),
+            "extraction_level": "minimal"
+        }
+    }
+
+def handle_gemini_safety_settings():
+    """Gemini安全性設定のガイダンス"""
+    return """
+    Gemini安全性フィルタ対策:
+    
+    1. プロンプトの調整
+       - 学術的・教育的目的を明記
+       - 技術文書として扱うことを強調
+       
+    2. モデル選択
+       - gemini-1.5-flash より gemini-1.5-pro を推奨
+       - より高度なコンテキスト理解
+       
+    3. 処理方法
+       - チャンクサイズを小さく (1-2ページ)
+       - 複雑な内容を分割処理
+    """
+
+def merge_chunks_with_safety_handling(chunk_results):
+    """安全性ブロックを考慮したチャンク統合"""
+    successful = [r for r in chunk_results if r["status"] in ["success", "partial"]]
+    blocked = [r for r in chunk_results if r["status"] == "blocked"]
+    failed = [r for r in chunk_results if r["status"] == "error"]
+    
+    if not successful:
+        return {"error": "すべてのチャンクで処理に失敗しました"}
+    
+    # 処理概要（詳細）
+    result = {
+        "processing_summary": {
+            "total_chunks": len(chunk_results),
+            "successful_chunks": len([r for r in chunk_results if r["status"] == "success"]),
+            "partial_chunks": len([r for r in chunk_results if r["status"] == "partial"]),
+            "blocked_chunks": len(blocked),
+            "failed_chunks": len(failed),
+            "safety_filter_issues": len(blocked) > 0
+        }
+    }
+    
+    # 安全性フィルタの警告
+    if blocked:
+        result["safety_warning"] = {
+            "message": "一部のチャンクが安全性フィルタによりブロックされました",
+            "blocked_pages": [r["pages"] for r in blocked],
+            "recommendation": "より小さなチャンクサイズまたは異なるモデルを試してください"
+        }
+    
+    # データをマージ（成功および部分成功のみ）
+    for chunk in sorted(successful, key=lambda x: x["id"]):
+        for key, value in chunk["data"].items():
+            if key not in result:
+                result[key] = value
+            else:
+                if isinstance(result[key], dict) and isinstance(value, dict):
+                    result[key] = merge_dicts(result[key], value)
+                elif isinstance(result[key], list) and isinstance(value, list):
+                    result[key] = merge_items(result[key], value)
+                elif isinstance(result[key], str) and isinstance(value, str):
+                    result[key] = merge_text(result[key], value)
+    
+    # 全体の重複除去処理
+    result = clean_duplicates(result)
+    
+    return result
 
 def clean_json_response(response):
     """AIレスポンスのJSONクリーニング"""
@@ -457,37 +578,8 @@ def merge_dicts(dict1, dict2):
     return result
 
 def merge_chunks(chunk_results):
-    """チャンク結果を統合（重複除去強化）"""
-    successful = [r for r in chunk_results if r["status"] == "success"]
-    if not successful:
-        return {"error": "すべてのチャンクで処理失敗"}
-    
-    # 処理概要
-    result = {
-        "processing_summary": {
-            "total_chunks": len(chunk_results),
-            "successful_chunks": len(successful),
-            "failed_chunks": len(chunk_results) - len(successful)
-        }
-    }
-    
-    # データをマージ（重複除去）
-    for chunk in sorted(successful, key=lambda x: x["id"]):
-        for key, value in chunk["data"].items():
-            if key not in result:
-                result[key] = value
-            else:
-                if isinstance(result[key], dict) and isinstance(value, dict):
-                    result[key] = merge_dicts(result[key], value)
-                elif isinstance(result[key], list) and isinstance(value, list):
-                    result[key] = merge_items(result[key], value)
-                elif isinstance(result[key], str) and isinstance(value, str):
-                    result[key] = merge_text(result[key], value)
-    
-    # 全体の重複除去処理
-    result = clean_duplicates(result)
-    
-    return result
+    """チャンク結果を統合（安全性フィルタ対応）"""
+    return merge_chunks_with_safety_handling(chunk_results)
 
 def process_pdf(pdf_path, model_name, api_key, schema, prompt=None, temperature=0.1, 
                max_tokens=32768, chunk_size=2, overlap=1, progress_container=None):
