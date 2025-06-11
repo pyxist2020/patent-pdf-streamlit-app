@@ -56,11 +56,12 @@ st.markdown("""
         margin-bottom: 2rem;
     }
     .page-progress {
-        margin: 10px 0;
-        padding: 10px;
+        margin: 5px 0;
+        padding: 8px 12px;
         border-radius: 5px;
         background-color: #f8f9fa;
         border-left: 4px solid #007bff;
+        font-size: 0.9em;
     }
     .error-page {
         background-color: #fff5f5;
@@ -69,6 +70,41 @@ st.markdown("""
     .success-page {
         background-color: #f0fff4;
         border-left: 4px solid #28a745;
+    }
+    .progress-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+        gap: 5px;
+        max-height: 200px;
+        overflow-y: auto;
+        border: 1px solid #e0e0e0;
+        border-radius: 5px;
+        padding: 10px;
+        background-color: #fafafa;
+    }
+    .page-badge {
+        display: inline-block;
+        padding: 4px 8px;
+        margin: 2px;
+        border-radius: 12px;
+        font-size: 0.8em;
+        font-weight: 500;
+        text-align: center;
+    }
+    .page-success {
+        background-color: #d4edda;
+        color: #155724;
+        border: 1px solid #c3e6cb;
+    }
+    .page-error {
+        background-color: #f8d7da;
+        color: #721c24;
+        border: 1px solid #f5c6cb;
+    }
+    .page-processing {
+        background-color: #d1ecf1;
+        color: #0c5460;
+        border: 1px solid #bee5eb;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -331,6 +367,9 @@ def process_pdf_by_pages(pdf_path: str, model_name: str, api_key: str, schema: D
         if progress_container:
             progress_bar = progress_container.progress(0)
             status_text = progress_container.empty()
+            # ページ状況表示用のコンテナ
+            page_status_container = progress_container.container()
+            page_status_placeholder = page_status_container.empty()
         
         try:
             # 各ページを処理
@@ -351,13 +390,28 @@ def process_pdf_by_pages(pdf_path: str, model_name: str, api_key: str, schema: D
                 
                 page_results.append(result)
                 
-                # 進捗表示の更新
+                # ページ状況をバッジ形式で表示
                 if progress_container:
-                    with progress_container:
-                        if result["status"] == "success":
-                            st.markdown(f'<div class="page-progress success-page">✅ ページ {page_num}: 処理完了</div>', unsafe_allow_html=True)
+                    page_badges = []
+                    for j, res in enumerate(page_results):
+                        page_number = j + 1
+                        if res["status"] == "success":
+                            page_badges.append(f'<span class="page-badge page-success">P{page_number} ✓</span>')
                         else:
-                            st.markdown(f'<div class="page-progress error-page">❌ ページ {page_num}: エラー - {result["error"]}</div>', unsafe_allow_html=True)
+                            page_badges.append(f'<span class="page-badge page-error">P{page_number} ✗</span>')
+                    
+                    # 処理待ちのページ
+                    for k in range(len(page_results), total_pages):
+                        page_number = k + 1
+                        if k == len(page_results):  # 現在処理中
+                            page_badges.append(f'<span class="page-badge page-processing">P{page_number} ...</span>')
+                        else:  # 待機中
+                            page_badges.append(f'<span class="page-badge">P{page_number}</span>')
+                    
+                    page_status_placeholder.markdown(
+                        f'<div style="margin: 10px 0;">{"".join(page_badges)}</div>', 
+                        unsafe_allow_html=True
+                    )
         
         finally:
             # 一時ファイルの削除
@@ -371,6 +425,20 @@ def process_pdf_by_pages(pdf_path: str, model_name: str, api_key: str, schema: D
         if progress_container:
             progress_bar.progress(1.0)
             status_text.text("全ページの処理が完了しました")
+            
+            # 最終的なページ状況を表示
+            final_badges = []
+            for res in page_results:
+                page_number = res["page_number"]
+                if res["status"] == "success":
+                    final_badges.append(f'<span class="page-badge page-success">P{page_number} ✓</span>')
+                else:
+                    final_badges.append(f'<span class="page-badge page-error" title="{res.get("error", "")}">P{page_number} ✗</span>')
+            
+            page_status_placeholder.markdown(
+                f'<div style="margin: 10px 0;">{"".join(final_badges)}</div>', 
+                unsafe_allow_html=True
+            )
         
         # 結果を統合
         merged_result = merge_page_results(page_results)
