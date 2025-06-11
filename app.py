@@ -661,12 +661,19 @@ with col2:
                     
                     # 処理詳細の表示
                     if processing_summary.get("page_details"):
-                        with st.expander("ページ別処理詳細", expanded=False):
-                            for detail in processing_summary["page_details"]:
-                                if detail["status"] == "success":
-                                    st.success(f"ページ {detail['page_number']}: 処理成功")
-                                else:
-                                    st.error(f"ページ {detail['page_number']}: {detail.get('error', '不明なエラー')}")
+                        st.markdown("### ページ別処理詳細")
+                        
+                        # 成功と失敗を分けて表示
+                        success_pages = [d for d in processing_summary["page_details"] if d["status"] == "success"]
+                        error_pages = [d for d in processing_summary["page_details"] if d["status"] == "error"]
+                        
+                        if success_pages:
+                            st.success(f"✅ 成功ページ: {', '.join([str(d['page_number']) for d in success_pages])}")
+                        
+                        if error_pages:
+                            st.error("❌ 失敗ページ:")
+                            for detail in error_pages:
+                                st.error(f"  • ページ {detail['page_number']}: {detail.get('error', '不明なエラー')}")
                     
                     # 統合された構造化データのキー数
                     data_keys = [k for k in result.keys() if k != "processing_summary"]
@@ -722,7 +729,8 @@ with col2:
         st.info("PDFをアップロードして「ページ単位で処理開始」ボタンをクリックすると、ここに統合された構造化JSONが表示されます")
         
         # デモ表示（オプション）
-        with st.expander("出力例"):
+        st.markdown("### 📋 出力例")
+        if st.checkbox("出力例を表示", key="show_example"):
             example_output = {
                 "processing_summary": {
                     "total_pages": 10,
