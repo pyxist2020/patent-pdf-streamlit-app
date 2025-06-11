@@ -104,11 +104,31 @@ def process_chunk(chunk, model_name, api_key, schema, prompt=None, temperature=0
         return {"id": chunk["id"], "pages": chunk["pages"], "status": "error", "error": str(e), "data": {}}
 
 def merge_text(text1, text2):
-    """テキストをマージ"""
+    """テキストをマージ（重複除去）"""
     if not text1 or not text2:
         return text1 or text2
     
     text1, text2 = text1.strip(), text2.strip()
+    
+    # 完全一致の場合は片方を返す
+    if text1 == text2:
+        return text1
+    
+    # 一方が他方に含まれる場合は長い方を返す
+    if text1 in text2:
+        return text2
+    if text2 in text1:
+        return text1
+    
+    # 空白区切りで分割して重複を除去
+    words1 = text1.split()
+    words2 = text2.split()
+    
+    # 大部分が重複している場合（類似度80%以上）は長い方を採用
+    common_words = set(words1) & set(words2)
+    total_words = set(words1) | set(words2)
+    if total_words and len(common_words) / len(total_words) > 0.8:
+        return text1 if len(text1) > len(text2) else text2
     
     # 継続パターンをチェック
     continues = (not text1.endswith(('.', '。', '!', '？')) or 
@@ -120,11 +140,100 @@ def merge_text(text1, text2):
 
 def merge_items(list1, list2):
     """リストアイテムをマージ（重複除去）"""
+    if not list1:
+        return list2
+    if not list2:
+        return list1
+    
     result = list1.copy()
+    
     for item in list2:
-        if not any(str(item) in str(existing) for existing in result):
+        # アイテムの重複チェック
+        is_duplicate = False
+        
+        for existing in result:
+            if isinstance(item, dict) and isinstance(existing, dict):
+                # 辞書の場合：キーと値の組み合わせで判定
+                if ('id' in item and 'id' in existing and item['id'] == existing['id']) or \
+                   ('number' in item and 'number' in existing and item['number'] == existing['number']) or \
+                   ('content' in item and 'content' in existing and 
+                    item.get('content', '') == existing.get('content', '')):
+                    is_duplicate = True
+                    # より完全な情報で既存を更新
+                    if len(str(item)) > len(str(existing)):
+                        idx = result.index(existing)
+                        result[idx] = item
+                    break
+            elif isinstance(item, str) and isinstance(existing, str):
+                # 文字列の場合：内容で判定
+                if item == existing or item in existing or existing in item:
+                    is_duplicate = True
+                    # より長い文字列で更新
+                    if len(item) > len(existing):
+                        idx = result.index(existing)
+                        result[idx] = item
+                    break
+            elif str(item) == str(existing):
+                is_duplicate = True
+                break
+        
+        if not is_duplicate:
             result.append(item)
+    
     return result
+
+def clean_duplicates(data):
+    """データ全体から重複を除去"""
+    if isinstance(data, dict):
+        cleaned = {}
+        for key, value in data.items():
+            if isinstance(value, str):
+                # 文字列から重複パターンを除去
+                cleaned_text = remove_repeated_patterns(value)
+                cleaned[key] = cleaned_text
+            elif isinstance(value, (dict, list)):
+                cleaned[key] = clean_duplicates(value)
+            else:
+                cleaned[key] = value
+        return cleaned
+    elif isinstance(data, list):
+        return [clean_duplicates(item) for item in data]
+    else:
+        return data
+
+def remove_repeated_patterns(text):
+    """文字列から重複パターンを除去"""
+    if not isinstance(text, str):
+        return text
+    
+    # 空白で分割
+    words = text.split()
+    if len(words) <= 1:
+        return text
+    
+    # 連続する重複単語を除去
+    cleaned_words = [words[0]]
+    for word in words[1:]:
+        if word != cleaned_words[-1]:
+            cleaned_words.append(word)
+    
+    # 同じフレーズの繰り返しを検出して除去
+    result_text = ' '.join(cleaned_words)
+    
+    # より長いパターンの重複を検出
+    for pattern_length in range(len(cleaned_words) // 2, 0, -1):
+        pattern = cleaned_words[:pattern_length]
+        pattern_str = ' '.join(pattern)
+        
+        # パターンが複数回繰り返されているかチェック
+        if result_text.count(pattern_str) > 1:
+            # 最初の出現のみを残す
+            parts = result_text.split(pattern_str)
+            if len(parts) > 2:  # パターンが2回以上出現
+                result_text = pattern_str.join([parts[0], parts[1]]) + pattern_str
+                break
+    
+    return result_text.strip()
 
 def merge_dicts(dict1, dict2):
     """辞書を再帰的にマージ"""
@@ -142,7 +251,7 @@ def merge_dicts(dict1, dict2):
     return result
 
 def merge_chunks(chunk_results):
-    """チャンク結果を統合"""
+    """チャンク結果を統合（重複除去強化）"""
     successful = [r for r in chunk_results if r["status"] == "success"]
     if not successful:
         return {"error": "すべてのチャンクで処理失敗"}
@@ -156,7 +265,7 @@ def merge_chunks(chunk_results):
         }
     }
     
-    # データをマージ
+    # データをマージ（重複除去）
     for chunk in sorted(successful, key=lambda x: x["id"]):
         for key, value in chunk["data"].items():
             if key not in result:
@@ -168,6 +277,9 @@ def merge_chunks(chunk_results):
                     result[key] = merge_items(result[key], value)
                 elif isinstance(result[key], str) and isinstance(value, str):
                     result[key] = merge_text(result[key], value)
+    
+    # 全体の重複除去処理
+    result = clean_duplicates(result)
     
     return result
 
