@@ -448,7 +448,7 @@ with col2:
                         st.json(result)
                         
                         # ダウンロードボタン
-                        json_str = json.dumps(result, indent=2, ensure_ascii=False)
+                        json_str = json.dumps(result, ensure_ascii=False)
                         output_filename = f"{Path(uploaded_pdf.name).stem}.json"
                         
                         st.download_button(
