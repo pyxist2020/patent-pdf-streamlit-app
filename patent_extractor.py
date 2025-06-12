@@ -2,7 +2,7 @@ import os
 import json
 import base64
 import logging
-from typing import Dict, Any, Optional, Iterator, Callable
+from typing import Dict, Any, Optional, Iterator, Callable, Generator
 from pathlib import Path
 
 import google.generativeai as genai
@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger("streaming-patent-extractor")
 
 class StreamingPatentExtractor:
-    """特許PDFから構造化JSONを抽出するライブラリ（ストリーミング専用）"""
+    """特許PDFから構造化JSONを抽出するライブラリ（Streamlit互換ストリーミング）"""
     
     def __init__(
         self, 
@@ -82,48 +82,43 @@ class StreamingPatentExtractor:
         else:
             raise ValueError(f"Unsupported model: {self.model_name}")
     
-    def process_patent_pdf_stream(
-        self, 
-        pdf_path: str, 
-        callback: Optional[Callable[[str], None]] = None
-    ) -> Iterator[str]:
+    def stream_patent_extraction(self, pdf_path: str) -> Generator[str, None, str]:
         """
-        特許PDFを処理し構造化情報をストリーミング出力
+        特許PDFを処理し構造化情報をStreamlit互換ストリーミング出力
         
         Args:
             pdf_path: PDFファイルのパス
-            callback: 各チャンクを受信したときに呼び出されるコールバック関数
             
         Yields:
             生成されたテキストのチャンク
+            
+        Returns:
+            完全な生成テキスト
         """
-        logger.info(f"Processing PDF with streaming: {pdf_path}")
+        logger.info(f"Starting Streamlit-compatible streaming for: {pdf_path}")
         
         try:
             # モデルタイプに応じた処理
             if "gemini" in self.model_name.lower():
-                yield from self._process_with_gemini_stream(pdf_path, callback)
+                yield from self._stream_with_gemini(pdf_path)
             elif "gpt" in self.model_name.lower() or "openai" in self.model_name.lower():
-                yield from self._process_with_openai_stream(pdf_path, callback)
+                yield from self._stream_with_openai(pdf_path)
             elif "claude" in self.model_name.lower():
-                yield from self._process_with_anthropic_stream(pdf_path, callback)
+                yield from self._stream_with_anthropic(pdf_path)
             else:
                 raise ValueError(f"Unsupported model: {self.model_name}")
                 
         except Exception as e:
-            logger.error(f"Error processing PDF: {e}")
-            error_chunk = json.dumps({
+            logger.error(f"Error in streaming extraction: {e}")
+            error_response = json.dumps({
                 "error": str(e),
                 "publicationIdentifier": Path(pdf_path).stem
-            })
-            yield error_chunk
+            }, indent=2)
+            yield error_response
+            return error_response
     
-    def _process_with_gemini_stream(
-        self, 
-        pdf_path: str, 
-        callback: Optional[Callable[[str], None]] = None
-    ) -> Iterator[str]:
-        """Geminiモデルでストリーミング処理"""
+    def _stream_with_gemini(self, pdf_path: str) -> Generator[str, None, str]:
+        """Geminiモデルでストリーミング処理（Streamlit互換）"""
         # 生成設定
         generation_config = {
             "temperature": self.temperature,
@@ -165,18 +160,16 @@ class StreamingPatentExtractor:
             stream=True
         )
         
+        full_text = ""
         for chunk in response:
             if chunk.text:
-                if callback:
-                    callback(chunk.text)
+                full_text += chunk.text
                 yield chunk.text
+        
+        return full_text
     
-    def _process_with_openai_stream(
-        self, 
-        pdf_path: str, 
-        callback: Optional[Callable[[str], None]] = None
-    ) -> Iterator[str]:
-        """OpenAIモデルでストリーミング処理"""
+    def _stream_with_openai(self, pdf_path: str) -> Generator[str, None, str]:
+        """OpenAIモデルでストリーミング処理（Streamlit互換）"""
         # スキーマをJSONとして整形
         schema_json = json.dumps(self.schema, indent=2)
         
@@ -223,19 +216,17 @@ class StreamingPatentExtractor:
             stream=True
         )
         
+        full_text = ""
         for chunk in stream:
             if chunk.choices[0].delta.content:
                 content = chunk.choices[0].delta.content
-                if callback:
-                    callback(content)
+                full_text += content
                 yield content
+        
+        return full_text
     
-    def _process_with_anthropic_stream(
-        self, 
-        pdf_path: str, 
-        callback: Optional[Callable[[str], None]] = None
-    ) -> Iterator[str]:
-        """Anthropicモデルでストリーミング処理"""
+    def _stream_with_anthropic(self, pdf_path: str) -> Generator[str, None, str]:
+        """Anthropicモデルでストリーミング処理（Streamlit互換）"""
         # スキーマをJSONとして整形
         schema_json = json.dumps(self.schema, indent=2)
         
@@ -244,6 +235,7 @@ class StreamingPatentExtractor:
             pdf_data = base64.b64encode(f.read()).decode("utf-8")
         
         # Anthropic API ストリーミング呼び出し
+        full_text = ""
         with self.client.messages.stream(
             model=self.model_name,
             system="You are a patent analysis assistant. Extract structured information from the patent PDF according to the provided JSON schema.",
@@ -280,9 +272,30 @@ class StreamingPatentExtractor:
             ]
         ) as stream:
             for text in stream.text_stream:
-                if callback:
-                    callback(text)
+                full_text += text
                 yield text
+        
+        return full_text
+    
+    def process_patent_pdf_stream(
+        self, 
+        pdf_path: str, 
+        callback: Optional[Callable[[str], None]] = None
+    ) -> Iterator[str]:
+        """
+        後方互換性のためのレガシーメソッド
+        
+        Args:
+            pdf_path: PDFファイルのパス
+            callback: 各チャンクを受信したときに呼び出されるコールバック関数
+            
+        Yields:
+            生成されたテキストのチャンク
+        """
+        for chunk in self.stream_patent_extraction(pdf_path):
+            if callback:
+                callback(chunk)
+            yield chunk
     
     def extract_json_from_stream(self, stream: Iterator[str]) -> Dict[str, Any]:
         """
@@ -314,7 +327,7 @@ class StreamingPatentExtractor:
             raise ValueError("No valid JSON found in response")
         except Exception as e:
             logger.error(f"Error extracting JSON: {e}")
-            return {"error": "Failed to parse JSON from AI response"}
+            return {"error": "Failed to parse JSON from AI response", "raw_text": text}
 
 
 def main():
@@ -354,13 +367,10 @@ def main():
     print("Starting streaming extraction...")
     full_output = ""
     
-    def progress_callback(chunk: str):
-        """進捗表示用コールバック"""
-        if not args.quiet:
-            print(chunk, end='', flush=True)
-    
     try:
-        for chunk in extractor.process_patent_pdf_stream(args.pdf_path, progress_callback):
+        for chunk in extractor.stream_patent_extraction(args.pdf_path):
+            if not args.quiet:
+                print(chunk, end='', flush=True)
             full_output += chunk
         
         if not args.quiet:
