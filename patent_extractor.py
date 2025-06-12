@@ -2,8 +2,12 @@ import os
 import json
 import base64
 import logging
-from typing import Dict, Any, Optional
+import asyncio
+from typing import Dict, Any, Optional, List
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+import time
 
 import google.generativeai as genai
 from openai import OpenAI
@@ -14,7 +18,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger("patent-extractor")
 
 class PatentExtractor:
-    """特許PDFから構造化JSONを抽出するライブラリ（マルチモーダルAI利用）"""
+    """特許PDFから構造化JSONを抽出するライブラリ（並列処理専用）"""
     
     def __init__(
         self, 
@@ -23,7 +27,8 @@ class PatentExtractor:
         json_schema: Optional[Dict] = None,
         user_prompt: Optional[str] = None,
         temperature: float = 0.1,
-        max_tokens: int = 4096
+        max_tokens: int = 4096,
+        max_workers: int = 8
     ):
         """
         初期化
@@ -35,12 +40,14 @@ class PatentExtractor:
             user_prompt: カスタムプロンプト
             temperature: 生成AI の temperature 設定値 (0.0〜1.0)
             max_tokens: 生成AI の最大トークン数
+            max_workers: 並列処理数（デフォルト8に増加）
         """
         self.model_name = model_name
         self.api_key = api_key or os.environ.get(self._get_env_var_name(model_name))
         self.schema = json_schema or {}
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.max_workers = max_workers
         
         # デフォルトプロンプト
         self.prompt = user_prompt or """
@@ -48,11 +55,84 @@ class PatentExtractor:
         フロントページ情報、請求項、詳細な説明など、スキーマに記載されたすべてのセクションを含めてください。
         スキーマ構造に正確に従い、すべての見出し、小見出しを抽出し、特許文書の階層構造を維持してください。
         化学式、図、表についてはそれらの識別子と参照情報を含めてください。
-        結果は有効なJSONとして出力し、マークダウン形式や説明文は含めないでください。
         """
+        
+        # フィールド定義（依存関係を最小化して並列度を最大化）
+        self.field_definitions = {
+            # Wave 1: 基本情報（完全並列）
+            "FrontPage": {
+                "description": "フロントページ情報（出願情報、発明者、出願人、分類、要約）を抽出",
+                "wave": 1,
+                "dependencies": []
+            },
+            "Claims": {
+                "description": "特許請求の範囲を抽出",
+                "wave": 1,
+                "dependencies": []
+            },
+            "Description": {
+                "description": "技術分野、背景技術、発明の概要、発明の詳細な説明を抽出",
+                "wave": 1,
+                "dependencies": []
+            },
+            # Wave 2: 専門データ（基本情報を参照するが並列実行）
+            "ChemicalStructureLibrary": {
+                "description": "特許中のすべての化学構造を抽出",
+                "wave": 2,
+                "dependencies": ["Claims", "Description"]
+            },
+            "BiologicalSequenceLibrary": {
+                "description": "特許中のすべての生物学的配列を抽出",
+                "wave": 2,
+                "dependencies": ["Claims", "Description"]
+            },
+            "Tables": {
+                "description": "特許中のすべての表を抽出",
+                "wave": 2,
+                "dependencies": ["Description"]
+            },
+            "Figures": {
+                "description": "特許中のすべての図を抽出",
+                "wave": 2,
+                "dependencies": ["Description"]
+            },
+            "IndustrialApplicability": {
+                "description": "産業上の利用可能性を抽出",
+                "wave": 2,
+                "dependencies": []
+            },
+            # Wave 3: 高度な分析（Wave 2の結果を活用）
+            "Examples": {
+                "description": "実施例を抽出",
+                "wave": 3,
+                "dependencies": ["Description", "ChemicalStructureLibrary", "Tables"]
+            },
+            "InternationalSearchReport": {
+                "description": "国際調査報告を抽出",
+                "wave": 3,
+                "dependencies": ["FrontPage"]
+            },
+            "PatentFamilyInformation": {
+                "description": "特許ファミリー情報を抽出",
+                "wave": 3,
+                "dependencies": ["FrontPage"]
+            },
+            "FrontPageContinuation": {
+                "description": "フロントページ続き情報を抽出",
+                "wave": 3,
+                "dependencies": ["FrontPage"]
+            }
+        }
         
         # クライアント初期化
         self._init_client()
+        
+        # 共有データ用のロック（高速化のためReadWriteLock風の実装）
+        self._data_lock = threading.RLock()
+        self._shared_data = {}
+        
+        # パフォーマンス測定
+        self._timing_data = {}
     
     def _get_env_var_name(self, model_name: str) -> str:
         """モデル名に応じた環境変数名を取得"""
@@ -82,14 +162,105 @@ class PatentExtractor:
         else:
             raise ValueError(f"Unsupported model: {self.model_name}")
     
-    def _encode_pdf_to_base64(self, pdf_path: str) -> str:
-        """PDFファイルをBase64エンコード"""
-        with open(pdf_path, "rb") as pdf_file:
-            return base64.b64encode(pdf_file.read()).decode("utf-8")
+    def _get_field_schema(self, field_name: str) -> Dict[str, Any]:
+        """特定フィールドのスキーマを取得"""
+        if field_name in self.schema.get("properties", {}):
+            field_schema = {
+                "type": "object",
+                "properties": {
+                    field_name: self.schema["properties"][field_name]
+                },
+                "required": [field_name] if field_name in self.schema.get("required", []) else []
+            }
+            # 定義も含める
+            if "definitions" in self.schema:
+                field_schema["definitions"] = self.schema["definitions"]
+            return field_schema
+        return {}
+    
+    def _create_field_prompt(self, field_name: str, dependency_context: str = "") -> str:
+        """フィールド専用のプロンプトを作成"""
+        field_prompts = {
+            "FrontPage": """
+            PDFの最初のページ（フロントページ）から以下の情報を抽出してください：
+            - 公開番号、公開日、出願番号、出願日
+            - 発明者情報（名前、住所）
+            - 出願人情報（名前、住所）
+            - 国際特許分類（IPC）
+            - 要約（Abstract）
+            - 優先権データがあれば含める
+            正確性を重視し、フロントページのレイアウトに従って情報を抽出してください。
+            """,
+            "Claims": """
+            特許請求の範囲（Claims）セクションから全ての請求項を抽出してください。
+            各請求項には番号とテキストを含めてください。
+            化学構造や表への参照も含めてください。
+            独立請求項と従属請求項の関係も明確にしてください。
+            """,
+            "Description": """
+            発明の詳細な説明から以下のセクションを抽出してください：
+            - 技術分野（Technical Field）
+            - 背景技術（Background Art）
+            - 発明の概要（Summary of Invention）
+            - 発明の詳細な説明（Detailed Description）
+            各セクションの構造と内容を維持し、階層構造を正確に抽出してください。
+            """,
+            "ChemicalStructureLibrary": """
+            特許文書全体から化学構造、化学式、化合物を抽出してください。
+            化合物番号、SMILES、分子式、化学名などの情報を含めてください。
+            化学構造画像への参照も含めてください。
+            各化合物の用途や特性も記載があれば含めてください。
+            """,
+            "BiologicalSequenceLibrary": """
+            特許文書全体から生物学的配列（タンパク質、DNA、RNA）を抽出してください。
+            配列ID（SEQ ID NO）、配列情報、生物種、機能情報を含めてください。
+            配列リストセクションがあれば優先的に参照してください。
+            """,
+            "Tables": """
+            特許文書全体から表を抽出してください。
+            表の構造、ヘッダー、データ、キャプションを完全に抽出してください。
+            表番号と位置情報も含めてください。
+            数値データの単位や注釈も忘れずに含めてください。
+            """,
+            "Figures": """
+            特許文書全体から図を抽出してください。
+            図番号、キャプション、参照情報を含めてください。
+            図の説明文も可能な限り抽出してください。
+            """,
+            "Examples": """
+            実施例セクションから全ての実施例を抽出してください。
+            実施例番号、タイトル、詳細な説明を含めてください。
+            化学構造、表、図への参照も含めてください。
+            実験条件、結果、考察も含めてください。
+            """,
+            "IndustrialApplicability": """
+            産業上の利用可能性に関するセクションを抽出してください。
+            適用分野、利用方法、産業への影響を含めてください。
+            """,
+            "InternationalSearchReport": """
+            国際調査報告書の情報を抽出してください。
+            引用文献、調査分野、見解書の内容を含めてください。
+            """,
+            "PatentFamilyInformation": """
+            特許ファミリー情報を抽出してください。
+            関連特許、ファミリー構成、優先権情報を含めてください。
+            """,
+            "FrontPageContinuation": """
+            フロントページの続き情報を抽出してください。
+            指定国、F-Term、その他の分類情報を含めてください。
+            """
+        }
+        
+        base_prompt = field_prompts.get(field_name, f"{field_name}を抽出してください。")
+        
+        if dependency_context:
+            return f"{base_prompt}\n\n{dependency_context}"
+        
+        return base_prompt
     
     def process_patent_pdf(self, pdf_path: str) -> Dict[str, Any]:
         """
-        特許PDFを処理し構造化情報を抽出
+        特許PDFを並列処理で高速抽出
         
         Args:
             pdf_path: PDFファイルのパス
@@ -97,116 +268,210 @@ class PatentExtractor:
         Returns:
             構造化された特許情報を含む辞書
         """
-        logger.info(f"Processing PDF: {pdf_path}")
+        start_time = time.time()
+        logger.info(f"Starting parallel processing of PDF: {pdf_path}")
         
         try:
-            # モデルタイプに応じた処理
-            if "gemini" in self.model_name.lower():
-                result = self._process_with_gemini(pdf_path)
-            elif "gpt" in self.model_name.lower() or "openai" in self.model_name.lower():
-                result = self._process_with_openai(pdf_path)
-            elif "claude" in self.model_name.lower():
-                result = self._process_with_anthropic(pdf_path)
-            else:
-                raise ValueError(f"Unsupported model: {self.model_name}")
+            result = self._process_parallel_waves(pdf_path)
             
             # 公開番号がない場合、ファイル名から設定
             if "publicationIdentifier" not in result:
                 result["publicationIdentifier"] = Path(pdf_path).stem
-                
+            
+            total_time = time.time() - start_time
+            logger.info(f"Total processing time: {total_time:.2f} seconds")
+            
+            # パフォーマンス情報を追加
+            result["_processing_info"] = {
+                "total_time_seconds": total_time,
+                "field_timing": self._timing_data,
+                "parallel_workers": self.max_workers,
+                "model_used": self.model_name
+            }
+            
             return result
             
         except Exception as e:
             logger.error(f"Error processing PDF: {e}")
-            # 最低限の結果を返して処理続行
             return {
                 "error": str(e),
                 "publicationIdentifier": Path(pdf_path).stem
             }
     
-    def _process_with_gemini(self, pdf_path: str) -> Dict[str, Any]:
-        """Geminiモデルでコンテンツを処理"""
-        # 生成設定
+    def _process_parallel_waves(self, pdf_path: str) -> Dict[str, Any]:
+        """Wave単位での並列処理（最大並列度を実現）"""
+        logger.info("Starting wave-based parallel processing")
+        
+        # Waveごとにフィールドをグループ化
+        wave_groups = {}
+        for field_name, field_info in self.field_definitions.items():
+            wave = field_info.get("wave", 999)
+            if wave not in wave_groups:
+                wave_groups[wave] = []
+            wave_groups[wave].append(field_name)
+        
+        final_result = {}
+        
+        # Wave順に処理（各Wave内は完全並列）
+        for wave in sorted(wave_groups.keys()):
+            fields_in_wave = wave_groups[wave]
+            wave_start_time = time.time()
+            
+            logger.info(f"Processing Wave {wave} with {len(fields_in_wave)} fields: {fields_in_wave}")
+            
+            # Wave内のすべてのフィールドを並列処理
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                future_to_field = {
+                    executor.submit(self._extract_field_with_timing, pdf_path, field_name): field_name
+                    for field_name in fields_in_wave
+                }
+                
+                # 結果を収集
+                wave_results = {}
+                for future in as_completed(future_to_field):
+                    field_name = future_to_field[future]
+                    try:
+                        field_result = future.result()
+                        if field_result and field_name in field_result:
+                            wave_results[field_name] = field_result[field_name]
+                            logger.info(f"✓ Wave {wave}: {field_name} completed")
+                        else:
+                            logger.warning(f"✗ Wave {wave}: {field_name} returned no data")
+                            wave_results[field_name] = None
+                    except Exception as e:
+                        logger.error(f"✗ Wave {wave}: {field_name} failed: {e}")
+                        wave_results[field_name] = {"error": str(e)}
+                
+                # Wave結果をマージ
+                final_result.update(wave_results)
+                
+                # 共有データを一括更新（次Waveの依存関係のため）
+                with self._data_lock:
+                    self._shared_data.update(wave_results)
+                
+                wave_time = time.time() - wave_start_time
+                logger.info(f"Wave {wave} completed in {wave_time:.2f} seconds")
+        
+        return final_result
+    
+    def _extract_field_with_timing(self, pdf_path: str, field_name: str) -> Dict[str, Any]:
+        """タイミング測定付きフィールド抽出"""
+        start_time = time.time()
+        try:
+            result = self._extract_field(pdf_path, field_name)
+            
+            processing_time = time.time() - start_time
+            self._timing_data[field_name] = processing_time
+            
+            return result
+        except Exception as e:
+            processing_time = time.time() - start_time
+            self._timing_data[field_name] = processing_time
+            raise e
+    
+    def _extract_field(self, pdf_path: str, field_name: str) -> Dict[str, Any]:
+        """特定フィールドを抽出"""
+        field_schema = self._get_field_schema(field_name)
+        
+        # 依存関係のコンテキストを高速取得
+        dependency_context = self._get_dependency_context(field_name)
+        field_prompt = self._create_field_prompt(field_name, dependency_context)
+        
+        # モデルタイプに応じた処理
+        if "gemini" in self.model_name.lower():
+            return self._process_field_with_gemini(pdf_path, field_prompt, field_schema)
+        elif "gpt" in self.model_name.lower() or "openai" in self.model_name.lower():
+            return self._process_field_with_openai(pdf_path, field_prompt, field_schema)
+        elif "claude" in self.model_name.lower():
+            return self._process_field_with_anthropic(pdf_path, field_prompt, field_schema)
+        else:
+            raise ValueError(f"Unsupported model: {self.model_name}")
+    
+    def _get_dependency_context(self, field_name: str) -> str:
+        """依存関係コンテキストを高速取得"""
+        dependencies = self.field_definitions.get(field_name, {}).get("dependencies", [])
+        
+        if not dependencies:
+            return ""
+        
+        # 読み込みロック（高速化）
+        with self._data_lock:
+            available_contexts = []
+            for dep in dependencies:
+                if dep in self._shared_data and self._shared_data[dep] is not None:
+                    # 要約版のコンテキストを作成（大容量データを避ける）
+                    dep_data = self._shared_data[dep]
+                    if isinstance(dep_data, dict):
+                        summary = self._create_context_summary(dep_data, dep)
+                        available_contexts.append(f"【{dep}参考情報】\n{summary}")
+            
+            if available_contexts:
+                return "\n\n以下の関連情報を参考にしてください：\n" + "\n".join(available_contexts)
+        
+        return ""
+    
+    def _create_context_summary(self, data: Dict[str, Any], field_name: str) -> str:
+        """コンテキスト要約を作成（大容量データの問題を回避）"""
+        if field_name == "Claims":
+            # 請求項の要約
+            claims = data.get("Claim", [])
+            return f"請求項数: {len(claims)}項目"
+        
+        elif field_name == "Description":
+            # 説明の要約
+            sections = []
+            for section_name in ["TechnicalField", "BackgroundArt", "SummaryOfInvention"]:
+                if section_name in data:
+                    sections.append(section_name)
+            return f"含まれるセクション: {', '.join(sections)}"
+        
+        else:
+            # その他の一般的な要約
+            return f"データ構造: {list(data.keys())[:5]}"  # 最初の5つのキーのみ
+    
+    def _process_field_with_gemini(self, pdf_path: str, prompt: str, schema: Dict) -> Dict[str, Any]:
+        """Geminiでフィールドを処理"""
         generation_config = {
             "temperature": self.temperature,
             "max_output_tokens": self.max_tokens,
+            "response_mime_type": "application/json",
+            "response_schema": schema
         }
         
-        # スキーマをJSONとして整形
-        schema_json = json.dumps(self.schema, indent=2)
-        
-        # モデル初期化とプロンプト準備
         model = self.client.GenerativeModel(
             model_name=self.model_name,
-            generation_config=generation_config
+            generation_config=generation_config,
+            system_instruction="You are a patent analysis assistant. Extract specific field information from the patent PDF according to the provided JSON schema. Focus on accuracy and completeness."
         )
         
-        # システム指示
-        system_instruction = "You are a patent analysis assistant. Extract structured information from the patent PDF according to the provided JSON schema. Your output must be valid JSON that conforms to the schema."
-        
-        # マルチモーダルプロンプト
-        full_prompt = f"""
-        {self.prompt}
-        
-        JSON SCHEMA:
-        ```json
-        {schema_json}
-        ```
-        
-        Extract information from the patent PDF and format it according to this schema.
-        Return ONLY valid JSON that conforms to the schema without any explanations or markdown formatting.
-        """
-        
-        # マルチモーダル入力
         with open(pdf_path, "rb") as f:
             pdf_data = f.read()
         
-        # マルチモーダルな内容生成
         response = model.generate_content(
             contents=[
-                system_instruction,
-                full_prompt,
+                prompt,
                 {"mime_type": "application/pdf", "data": pdf_data}
             ]
         )
         
-        # JSONを抽出
-        return self._extract_json_from_text(response.text)
+        return json.loads(response.text)
     
-    def _process_with_openai(self, pdf_path: str) -> Dict[str, Any]:
-        """OpenAIモデルでコンテンツを処理"""
-        # スキーマをJSONとして整形
-        schema_json = json.dumps(self.schema, indent=2)
-        
-        # PDFをbase64エンコード
+    def _process_field_with_openai(self, pdf_path: str, prompt: str, schema: Dict) -> Dict[str, Any]:
+        """OpenAIでフィールドを処理"""
         with open(pdf_path, "rb") as f:
             pdf_data = base64.b64encode(f.read()).decode("utf-8")
         
-        # OpenAI API呼び出し
         response = self.client.chat.completions.create(
             model=self.model_name,
             messages=[
                 {
                     "role": "system", 
-                    "content": "You are a patent analysis assistant. Extract structured information from patents according to the provided JSON schema."
+                    "content": "You are a patent analysis assistant. Extract specific field information from patents according to the provided JSON schema. Focus on accuracy and completeness."
                 },
                 {
                     "role": "user",
                     "content": [
-                        {
-                            "type": "text",
-                            "text": f"""
-                            {self.prompt}
-                            
-                            JSON SCHEMA:
-                            ```json
-                            {schema_json}
-                            ```
-                            
-                            Extract information from the patent PDF and format it according to this schema.
-                            Return ONLY valid JSON that conforms to the schema without any explanations or markdown formatting.
-                            """
-                        },
+                        {"type": "text", "text": prompt},
                         {
                             "type": "file",
                             "file": {
@@ -218,24 +483,29 @@ class PatentExtractor:
                 }
             ],
             temperature=self.temperature,
-            max_tokens=self.max_tokens
+            max_tokens=self.max_tokens,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "field_extraction",
+                    "schema": schema,
+                    "strict": True
+                }
+            }
         )
         
-        return self._extract_json_from_text(response.choices[0].message.content)
+        return json.loads(response.choices[0].message.content)
     
-    def _process_with_anthropic(self, pdf_path: str) -> Dict[str, Any]:
-        """Anthropicモデルでコンテンツを処理"""
-        # スキーマをJSONとして整形
-        schema_json = json.dumps(self.schema, indent=2)
+    def _process_field_with_anthropic(self, pdf_path: str, prompt: str, schema: Dict) -> Dict[str, Any]:
+        """Anthropicでフィールドを処理"""
+        schema_json = json.dumps(schema, indent=2)
         
-        # PDFをbase64としてエンコード
         with open(pdf_path, "rb") as f:
             pdf_data = base64.b64encode(f.read()).decode("utf-8")
         
-        # Anthropic API呼び出し
         response = self.client.messages.create(
             model=self.model_name,
-            system="You are a patent analysis assistant. Extract structured information from the patent PDF according to the provided JSON schema.",
+            system="You are a patent analysis assistant. Extract specific field information from the patent PDF according to the provided JSON schema. Focus on accuracy and completeness.",
             max_tokens=self.max_tokens,
             temperature=self.temperature,
             messages=[
@@ -245,14 +515,14 @@ class PatentExtractor:
                         {
                             "type": "text",
                             "text": f"""
-                            {self.prompt}
+                            {prompt}
                             
                             JSON SCHEMA:
                             ```json
                             {schema_json}
                             ```
                             
-                            Extract information from the patent PDF and format it according to this schema.
+                            Extract the specified field information from the patent PDF and format it according to this schema.
                             Return ONLY valid JSON that conforms to the schema without any explanations or markdown formatting.
                             """
                         },
@@ -272,14 +542,12 @@ class PatentExtractor:
         return self._extract_json_from_text(response.content[0].text)
     
     def _extract_json_from_text(self, text: str) -> Dict[str, Any]:
-        """テキストからJSONを抽出"""
+        """テキストからJSONを抽出（Anthropic用）"""
         try:
-            # コードブロックからJSONを抽出
             if "```json" in text:
                 json_block = text.split("```json")[1].split("```")[0].strip()
                 return json.loads(json_block)
             
-            # { } で囲まれた部分を抽出
             json_start = text.find('{')
             json_end = text.rfind('}') + 1
             
@@ -287,7 +555,6 @@ class PatentExtractor:
                 json_text = text[json_start:json_end]
                 return json.loads(json_text)
             
-            # JSONが見つからなかった場合
             raise ValueError("No valid JSON found in response")
         except Exception as e:
             logger.error(f"Error extracting JSON: {e}")
@@ -297,7 +564,7 @@ def main():
     """コマンドライン実行用のメイン関数"""
     import argparse
     
-    parser = argparse.ArgumentParser(description='Extract structured information from patent PDFs')
+    parser = argparse.ArgumentParser(description='Extract structured information from patent PDFs with high-speed parallel processing')
     parser.add_argument('pdf_path', help='Path to the patent PDF file')
     parser.add_argument('--model', default='gemini-1.5-pro', help='AI model to use')
     parser.add_argument('--api-key', help='API key')
@@ -306,6 +573,7 @@ def main():
     parser.add_argument('--prompt', help='Custom prompt')
     parser.add_argument('--temperature', type=float, default=0.1, help='Temperature for generation (0.0-1.0)')
     parser.add_argument('--max-tokens', type=int, default=4096, help='Maximum tokens to generate')
+    parser.add_argument('--max-workers', type=int, default=8, help='Number of parallel workers (default: 8)')
     
     args = parser.parse_args()
     
@@ -322,7 +590,8 @@ def main():
         json_schema=schema,
         user_prompt=args.prompt,
         temperature=args.temperature,
-        max_tokens=args.max_tokens
+        max_tokens=args.max_tokens,
+        max_workers=args.max_workers
     )
     
     # PDFの処理
@@ -333,6 +602,17 @@ def main():
         with open(args.output, 'w', encoding='utf-8') as f:
             json.dump(result, f, indent=2, ensure_ascii=False)
         print(f"Output saved to {args.output}")
+        
+        # パフォーマンス情報の表示
+        if "_processing_info" in result:
+            info = result["_processing_info"]
+            print(f"\nPerformance Summary:")
+            print(f"Total Time: {info['total_time_seconds']:.2f} seconds")
+            print(f"Parallel Workers: {info['parallel_workers']}")
+            print(f"Model: {info['model_used']}")
+            print(f"\nField Processing Times:")
+            for field, time_taken in info['field_timing'].items():
+                print(f"  {field}: {time_taken:.2f}s")
     else:
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
