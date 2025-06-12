@@ -7,7 +7,7 @@ from pathlib import Path
 import threading
 import queue
 
-from streaming_patent_extractor import StreamingPatentExtractor
+from patent_extractor import StreamingPatentExtractor
 
 # ページ設定
 st.set_page_config(
