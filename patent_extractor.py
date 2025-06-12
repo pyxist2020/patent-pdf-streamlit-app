@@ -57,9 +57,14 @@ class PatentExtractor:
         化学式、図、表についてはそれらの識別子と参照情報を含めてください。
         """
         
-        # フィールド定義（依存関係を最小化して並列度を最大化）
+        # フィールド定義（スキーマに基づいて完全にカバー）
         self.field_definitions = {
-            # Wave 1: 基本情報（完全並列）
+            # Wave 1: 基本必須情報（完全並列）
+            "publicationIdentifier": {
+                "description": "特許公開番号を抽出",
+                "wave": 1,
+                "dependencies": []
+            },
             "FrontPage": {
                 "description": "フロントページ情報（出願情報、発明者、出願人、分類、要約）を抽出",
                 "wave": 1,
@@ -75,7 +80,8 @@ class PatentExtractor:
                 "wave": 1,
                 "dependencies": []
             },
-            # Wave 2: 専門データ（基本情報を参照するが並列実行）
+            
+            # Wave 2: 基本データライブラリ（基本情報を参照するが並列実行）
             "ChemicalStructureLibrary": {
                 "description": "特許中のすべての化学構造を抽出",
                 "wave": 2,
@@ -86,27 +92,23 @@ class PatentExtractor:
                 "wave": 2,
                 "dependencies": ["Claims", "Description"]
             },
-            "Tables": {
-                "description": "特許中のすべての表を抽出",
+            "Figures": {
+                "description": "特許中のすべての図を抽出",
                 "wave": 2,
                 "dependencies": ["Description"]
             },
-            "Figures": {
-                "description": "特許中のすべての図を抽出",
+            "Tables": {
+                "description": "特許中のすべての表を抽出",
                 "wave": 2,
                 "dependencies": ["Description"]
             },
             "IndustrialApplicability": {
                 "description": "産業上の利用可能性を抽出",
                 "wave": 2,
-                "dependencies": []
+                "dependencies": ["Description"]
             },
-            # Wave 3: 高度な分析（Wave 2の結果を活用）
-            "Examples": {
-                "description": "実施例を抽出",
-                "wave": 3,
-                "dependencies": ["Description", "ChemicalStructureLibrary", "Tables"]
-            },
+            
+            # Wave 3: 高度な分析・メタデータ（Wave 2の結果を活用）
             "InternationalSearchReport": {
                 "description": "国際調査報告を抽出",
                 "wave": 3,
@@ -118,11 +120,14 @@ class PatentExtractor:
                 "dependencies": ["FrontPage"]
             },
             "FrontPageContinuation": {
-                "description": "フロントページ続き情報を抽出",
+                "description": "フロントページ続き情報（指定国、F-Term等）を抽出",
                 "wave": 3,
                 "dependencies": ["FrontPage"]
             }
         }
+        
+        # スキーマから動的にフィールド定義を更新
+        self._update_field_definitions_from_schema()
         
         # クライアント初期化
         self._init_client()
@@ -133,6 +138,56 @@ class PatentExtractor:
         
         # パフォーマンス測定
         self._timing_data = {}
+    
+    def _update_field_definitions_from_schema(self):
+        """スキーマから動的にフィールド定義を更新"""
+        if not self.schema or "properties" not in self.schema:
+            return
+            
+        schema_properties = self.schema["properties"]
+        required_fields = set(self.schema.get("required", []))
+        
+        # スキーマにあるがfield_definitionsにないフィールドを追加
+        for field_name in schema_properties:
+            if field_name not in self.field_definitions:
+                # 必須フィールドは Wave 1、オプションフィールドは Wave 2
+                wave = 1 if field_name in required_fields else 2
+                
+                # フィールドの特性に基づいて依存関係を推定
+                dependencies = self._infer_dependencies(field_name, schema_properties[field_name])
+                
+                self.field_definitions[field_name] = {
+                    "description": f"{field_name}セクションを抽出",
+                    "wave": wave,
+                    "dependencies": dependencies
+                }
+                
+                logger.info(f"Added field from schema: {field_name} (Wave {wave})")
+    
+    def _infer_dependencies(self, field_name: str, field_schema: Dict) -> List[str]:
+        """フィールドの依存関係を推定"""
+        dependencies = []
+        
+        # フィールド名に基づく推論
+        if "library" in field_name.lower():
+            dependencies.extend(["Claims", "Description"])
+        elif "continuation" in field_name.lower() or "family" in field_name.lower():
+            dependencies.append("FrontPage")
+        elif field_name in ["Examples"]:
+            dependencies.extend(["Description", "ChemicalStructureLibrary", "Tables"])
+        
+        # スキーマ内の参照を確認
+        field_str = json.dumps(field_schema)
+        if "ChemicalStructure" in field_str:
+            dependencies.append("ChemicalStructureLibrary")
+        if "BiologicalSequence" in field_str:
+            dependencies.append("BiologicalSequenceLibrary")
+        if "Table" in field_str:
+            dependencies.append("Tables")
+        if "Figure" in field_str:
+            dependencies.append("Figures")
+            
+        return list(set(dependencies))  # 重複を除去
     
     def _get_env_var_name(self, model_name: str) -> str:
         """モデル名に応じた環境変数名を取得"""
@@ -258,11 +313,16 @@ Important:
     def _create_field_prompt(self, field_name: str, dependency_context: str = "") -> str:
         """フィールド専用のプロンプトを作成"""
         field_prompts = {
+            "publicationIdentifier": """
+            特許の公開番号（例：WO2020162638A1, JP2020-123456A, US10123456B2等）を抽出してください。
+            フロントページの最上部に記載されている番号を確認してください。
+            """,
             "FrontPage": """
             PDFの最初のページ（フロントページ）から以下の情報を抽出してください：
             - 公開番号、公開日、出願番号、出願日
             - 発明者情報（名前、住所）
             - 出願人情報（名前、住所）
+            - 代理人情報（もしあれば）
             - 国際特許分類（IPC）
             - 要約（Abstract）
             - 優先権データがあれば含める
@@ -273,62 +333,91 @@ Important:
             各請求項には番号とテキストを含めてください。
             化学構造や表への参照も含めてください。
             独立請求項と従属請求項の関係も明確にしてください。
+            生物学的配列への参照もあれば含めてください。
             """,
             "Description": """
             発明の詳細な説明から以下のセクションを抽出してください：
             - 技術分野（Technical Field）
             - 背景技術（Background Art）
             - 発明の概要（Summary of Invention）
-            - 発明の詳細な説明（Detailed Description）
+              - 解決すべき問題（Problem to Solve）
+              - 問題解決手段（Means for Solving Problem）
+              - 発明の効果（Effects of Invention）
+            - 発明の詳細な説明（Detailed Description of Invention）
+            - 実施例（Examples）
             各セクションの構造と内容を維持し、階層構造を正確に抽出してください。
             """,
             "ChemicalStructureLibrary": """
             特許文書全体から化学構造、化学式、化合物を抽出してください。
-            化合物番号、SMILES、分子式、化学名などの情報を含めてください。
-            化学構造画像をグラフとして構造化してください。。
+            以下の情報を含めてください：
+            - 化合物番号、SMILES、分子式、化学名
+            - 原子と結合の詳細情報
+            - 立体化学情報
+            - 官能基情報
+            - 特許固有の情報（化合物番号、活性データ、合成参照等）
+            化学構造画像への参照も含めてください。
             各化合物の用途や特性も記載があれば含めてください。
             """,
             "BiologicalSequenceLibrary": """
             特許文書全体から生物学的配列（タンパク質、DNA、RNA）を抽出してください。
-            配列ID（SEQ ID NO）、配列情報、生物種、機能情報を含めてください。
+            以下の情報を含めてください：
+            - 配列ID（SEQ ID NO）、配列情報、生物種、機能情報
+            - タンパク質配列の場合：アミノ酸配列、分子量、等電点、機能ドメイン
+            - 核酸配列の場合：塩基配列、配列タイプ（DNA/RNA）、遺伝子要素
+            - 特許における役割（抗原、抗体、酵素等）
             配列リストセクションがあれば優先的に参照してください。
-            """,
-            "Tables": """
-            特許文書全体から表を抽出してください。
-            表の構造、ヘッダー、データ、キャプションを完全に抽出してください。
-            表番号と位置情報も含めてください。
-            数値データの単位や注釈も忘れずに含めてください。
             """,
             "Figures": """
             特許文書全体から図を抽出してください。
             図番号、キャプション、参照情報を含めてください。
             図の説明文も可能な限り抽出してください。
+            図の種類（化学構造図、フローチャート、グラフ等）も識別してください。
             """,
-            "Examples": """
-            実施例セクションから全ての実施例を抽出してください。
-            実施例番号、タイトル、詳細な説明を含めてください。
-            化学構造、表、図への参照も含めてください。
-            実験条件、結果、考察も含めてください。
+            "Tables": """
+            特許文書全体から表を抽出してください。
+            以下の情報を完全に抽出してください：
+            - 表の構造、ヘッダー、データ、キャプション
+            - 表番号と位置情報
+            - 数値データの単位や注釈
+            - 化学化合物や生物学的データの場合は関連情報
+            - 表の種類（実験データ、比較データ、分析データ等）
+            - 統計情報があれば含める
             """,
             "IndustrialApplicability": """
             産業上の利用可能性に関するセクションを抽出してください。
             適用分野、利用方法、産業への影響を含めてください。
+            医薬品、化学品、バイオテクノロジー等の産業分野を特定してください。
             """,
             "InternationalSearchReport": """
             国際調査報告書の情報を抽出してください。
-            引用文献、調査分野、見解書の内容を含めてください。
+            以下の情報を含めてください：
+            - 引用文献リスト
+            - 調査分野
+            - 見解書の内容
+            - 特許性に関するコメント
+            表形式のデータがあれば含めてください。
             """,
             "PatentFamilyInformation": """
             特許ファミリー情報を抽出してください。
-            関連特許、ファミリー構成、優先権情報を含めてください。
+            以下の情報を含めてください：
+            - 関連特許の一覧
+            - ファミリー構成
+            - 優先権情報
+            - 各国での出願状況
+            表形式のデータがあれば含めてください。
             """,
             "FrontPageContinuation": """
             フロントページの続き情報を抽出してください。
-            指定国、F-Term、その他の分類情報を含めてください。
+            以下の情報を含めてください：
+            - 指定国情報
+            - F-Term分類
+            - その他の分類情報
+            - 追加の発明者情報
+            - 要約の続き
             """
         }
         
-        base_prompt = field_prompts.get(field_name, f"{field_name}を抽出してください。")
+        base_prompt = field_prompts.get(field_name, f"{field_name}セクションを抽出してください。構造化されたJSONとして返してください。")
         
         if dependency_context:
             return f"{base_prompt}\n\n{dependency_context}"
@@ -347,12 +436,13 @@ Important:
         """
         start_time = time.time()
         logger.info(f"Starting parallel processing of PDF: {pdf_path}")
+        logger.info(f"Processing {len(self.field_definitions)} fields: {list(self.field_definitions.keys())}")
         
         try:
             result = self._process_parallel_waves(pdf_path)
             
             # 公開番号がない場合、ファイル名から設定
-            if "publicationIdentifier" not in result:
+            if "publicationIdentifier" not in result or not result["publicationIdentifier"]:
                 result["publicationIdentifier"] = Path(pdf_path).stem
             
             total_time = time.time() - start_time
@@ -363,7 +453,9 @@ Important:
                 "total_time_seconds": total_time,
                 "field_timing": self._timing_data,
                 "parallel_workers": self.max_workers,
-                "model_used": self.model_name
+                "model_used": self.model_name,
+                "fields_processed": len(self.field_definitions),
+                "successful_fields": len([k for k, v in result.items() if not k.startswith("_") and v is not None])
             }
             
             return result
@@ -502,10 +594,31 @@ Important:
         elif field_name == "Description":
             # 説明の要約
             sections = []
-            for section_name in ["TechnicalField", "BackgroundArt", "SummaryOfInvention"]:
+            for section_name in ["TechnicalField", "BackgroundArt", "SummaryOfInvention", "DetailedDescriptionOfInvention"]:
                 if section_name in data:
                     sections.append(section_name)
             return f"含まれるセクション: {', '.join(sections)}"
+        
+        elif field_name == "ChemicalStructureLibrary":
+            # 化学構造ライブラリの要約
+            compounds = data.get("Compound", [])
+            return f"化学化合物数: {len(compounds)}個"
+        
+        elif field_name == "BiologicalSequenceLibrary":
+            # 生物学的配列ライブラリの要約
+            proteins = data.get("ProteinSequence", [])
+            nucleic_acids = data.get("NucleicAcidSequence", [])
+            return f"タンパク質配列: {len(proteins)}個、核酸配列: {len(nucleic_acids)}個"
+        
+        elif field_name == "Tables":
+            # 表の要約
+            tables = data.get("Table", [])
+            return f"表の数: {len(tables)}個"
+        
+        elif field_name == "Figures":
+            # 図の要約
+            figures = data.get("Figure", [])
+            return f"図の数: {len(figures)}個"
         
         else:
             # その他の一般的な要約
@@ -621,6 +734,58 @@ Important:
             logger.error(f"Error extracting JSON: {e}")
             return {"error": "Failed to parse JSON from AI response"}
 
+    def get_field_list(self) -> Dict[str, Dict]:
+        """利用可能なフィールドのリストを取得"""
+        return self.field_definitions
+    
+    def validate_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        """結果をスキーマに対して検証"""
+        validation_report = {
+            "is_valid": True,
+            "errors": [],
+            "warnings": [],
+            "coverage": {}
+        }
+        
+        if not self.schema:
+            validation_report["warnings"].append("No schema provided for validation")
+            return validation_report
+        
+        # 必須フィールドのチェック
+        required_fields = self.schema.get("required", [])
+        for field in required_fields:
+            if field not in result or result[field] is None:
+                validation_report["errors"].append(f"Required field '{field}' is missing or null")
+                validation_report["is_valid"] = False
+            else:
+                validation_report["coverage"][field] = "present"
+        
+        # オプションフィールドのカバレッジチェック
+        schema_properties = self.schema.get("properties", {})
+        for field in schema_properties:
+            if field not in required_fields:
+                if field in result and result[field] is not None:
+                    validation_report["coverage"][field] = "present"
+                else:
+                    validation_report["coverage"][field] = "missing"
+        
+        # データタイプの基本チェック
+        for field_name, field_value in result.items():
+            if field_name.startswith("_"):  # メタデータフィールドをスキップ
+                continue
+                
+            if field_name in schema_properties:
+                expected_type = schema_properties[field_name].get("type")
+                if expected_type and field_value is not None:
+                    if expected_type == "object" and not isinstance(field_value, dict):
+                        validation_report["warnings"].append(f"Field '{field_name}' should be object but got {type(field_value).__name__}")
+                    elif expected_type == "array" and not isinstance(field_value, list):
+                        validation_report["warnings"].append(f"Field '{field_name}' should be array but got {type(field_value).__name__}")
+                    elif expected_type == "string" and not isinstance(field_value, str):
+                        validation_report["warnings"].append(f"Field '{field_name}' should be string but got {type(field_value).__name__}")
+        
+        return validation_report
+
 def main():
     """コマンドライン実行用のメイン関数"""
     import argparse
@@ -635,6 +800,8 @@ def main():
     parser.add_argument('--temperature', type=float, default=0.1, help='Temperature for generation (0.0-1.0)')
     parser.add_argument('--max-tokens', type=int, default=4096, help='Maximum tokens to generate')
     parser.add_argument('--max-workers', type=int, default=8, help='Number of parallel workers (default: 8)')
+    parser.add_argument('--validate', action='store_true', help='Validate result against schema')
+    parser.add_argument('--list-fields', action='store_true', help='List all available fields and exit')
     
     args = parser.parse_args()
     
@@ -644,7 +811,7 @@ def main():
         with open(args.schema, 'r', encoding='utf-8') as f:
             schema = json.load(f)
     
-    # エクストラクタの初期化と実行
+    # エクストラクタの初期化
     extractor = PatentExtractor(
         model_name=args.model,
         api_key=args.api_key,
@@ -655,8 +822,31 @@ def main():
         max_workers=args.max_workers
     )
     
+    # フィールドリスト表示
+    if args.list_fields:
+        print("Available fields:")
+        field_list = extractor.get_field_list()
+        for wave in sorted(set(info["wave"] for info in field_list.values())):
+            print(f"\nWave {wave}:")
+            for field_name, field_info in field_list.items():
+                if field_info["wave"] == wave:
+                    deps = ", ".join(field_info["dependencies"]) if field_info["dependencies"] else "None"
+                    print(f"  {field_name}: {field_info['description']} (deps: {deps})")
+        return
+    
     # PDFの処理
     result = extractor.process_patent_pdf(args.pdf_path)
+    
+    # 検証
+    if args.validate and schema:
+        validation_report = extractor.validate_result(result)
+        print(f"\nValidation Report:")
+        print(f"Valid: {validation_report['is_valid']}")
+        if validation_report['errors']:
+            print(f"Errors: {validation_report['errors']}")
+        if validation_report['warnings']:
+            print(f"Warnings: {validation_report['warnings']}")
+        print(f"Field Coverage: {len([k for k, v in validation_report['coverage'].items() if v == 'present'])}/{len(validation_report['coverage'])} fields")
     
     # 結果の出力
     if args.output:
@@ -671,8 +861,10 @@ def main():
             print(f"Total Time: {info['total_time_seconds']:.2f} seconds")
             print(f"Parallel Workers: {info['parallel_workers']}")
             print(f"Model: {info['model_used']}")
+            print(f"Fields Processed: {info['fields_processed']}")
+            print(f"Successful Fields: {info['successful_fields']}")
             print(f"\nField Processing Times:")
-            for field, time_taken in info['field_timing'].items():
+            for field, time_taken in sorted(info['field_timing'].items(), key=lambda x: x[1], reverse=True):
                 print(f"  {field}: {time_taken:.2f}s")
     else:
         print(json.dumps(result, indent=2, ensure_ascii=False))
