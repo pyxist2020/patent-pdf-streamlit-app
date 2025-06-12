@@ -535,7 +535,7 @@ Important:
         return self._extract_json_from_text(response.text)
     
     def _process_field_with_openai_prompt(self, pdf_path: str, prompt: str) -> Dict[str, Any]:
-        """OpenAIでフィールドを処理（プロンプトベース）"""
+        """OpenAIでフィールドを処理（fileタイプ使用）"""
         with open(pdf_path, "rb") as f:
             pdf_data = base64.b64encode(f.read()).decode("utf-8")
         
@@ -554,10 +554,10 @@ Important:
                             "text": f"{prompt}\n\nReturn only valid JSON."
                         },
                         {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:application/pdf;base64,{pdf_data}",
-                                "detail": "high"
+                            "type": "file",
+                            "file": {
+                                "filename": f"{pdf_path}",
+                                "file_data": f"data:application/pdf;base64,{pdf_data}"
                             }
                         }
                     ]
