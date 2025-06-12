@@ -38,8 +38,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# モデルオプション
-MODEL_OPTIONS = {
+# デフォルトモデルオプション
+DEFAULT_MODEL_OPTIONS = {
     "Google Gemini": ["gemini-1.5-pro", "gemini-1.5-flash"],
     "OpenAI": ["gpt-4o", "gpt-4-vision-preview"],
     "Anthropic": ["claude-3-5-sonnet-20241022", "claude-3-opus-20240229"]
@@ -52,6 +52,58 @@ def get_api_key_from_env(provider):
         "Anthropic": "ANTHROPIC_API_KEY"
     }
     return os.environ.get(env_vars.get(provider, ""), "")
+
+@st.cache_data(ttl=3600)
+def fetch_available_models(provider, api_key):
+    """APIから利用可能なモデル一覧を取得"""
+    try:
+        if not api_key:
+            return []
+        
+        if provider == "Google Gemini":
+            import google.generativeai as genai
+            genai.configure(api_key=api_key)
+            models = genai.list_models()
+            return [model.name.replace('models/', '') for model in models 
+                   if 'generateContent' in model.supported_generation_methods]
+        
+        elif provider == "OpenAI":
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key)
+            models = client.models.list()
+            model_names = [model.id for model in models.data 
+                          if 'gpt' in model.id.lower() or 'vision' in model.id.lower()]
+            return sorted(model_names, reverse=True)
+        
+        elif provider == "Anthropic":
+            # AnthropicのAPIはモデル一覧を提供していないため、既知のモデルを返す
+            return [
+                "claude-3-5-sonnet-20241022",
+                "claude-3-5-haiku-20241022",
+                "claude-3-opus-20240229",
+                "claude-3-sonnet-20240229", 
+                "claude-3-haiku-20240307"
+            ]
+        
+        return []
+        
+    except Exception as e:
+        st.error(f"モデル一覧の取得に失敗しました: {str(e)}")
+        return []
+
+def get_models_with_cache(provider, api_key):
+    """キャッシュを使用してモデル一覧を取得"""
+    if not api_key:
+        return DEFAULT_MODEL_OPTIONS.get(provider, [])
+    
+    try:
+        available_models = fetch_available_models(provider, api_key)
+        if available_models:
+            return available_models
+        else:
+            return DEFAULT_MODEL_OPTIONS.get(provider, [])
+    except:
+        return DEFAULT_MODEL_OPTIONS.get(provider, [])
 
 def load_schema(file_path=None, file_content=None):
     try:
@@ -128,9 +180,28 @@ with st.sidebar:
     max_workers = st.slider("並列ワーカー数", 1, 16, 8, help="同時処理数")
     
     # AIモデル設定
-    provider = st.selectbox("AIプロバイダー", list(MODEL_OPTIONS.keys()))
-    model_name = st.selectbox("モデル", MODEL_OPTIONS[provider])
+    provider = st.selectbox("AIプロバイダー", list(DEFAULT_MODEL_OPTIONS.keys()))
     api_key = st.text_input(f"{provider} APIキー", value=get_api_key_from_env(provider), type="password")
+    
+    # モデル取得と選択
+    with st.spinner("利用可能なモデルを取得中..."):
+        available_models = get_models_with_cache(provider, api_key)
+    
+    if available_models:
+        if api_key:
+            st.info(f"✅ {len(available_models)}個のモデルを取得")
+        else:
+            st.info("ℹ️ デフォルトモデル一覧を表示")
+        
+        model_name = st.selectbox("モデル", available_models)
+        
+        # モデル更新ボタン
+        if st.button("🔄 モデル一覧を更新"):
+            st.cache_data.clear()
+            st.rerun()
+    else:
+        st.error("モデル取得に失敗しました。APIキーを確認してください。")
+        model_name = ""
     
     # スキーマ設定
     schema_type = st.radio("JSONスキーマ", ["デフォルト", "ファイルアップロード", "直接入力"])
