@@ -5,7 +5,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from patent_extractor_structured import PatentExtractor
+from patent_extractor import PatentExtractor
 
 # ページ設定
 st.set_page_config(
