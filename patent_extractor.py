@@ -163,20 +163,46 @@ class PatentExtractor:
             raise ValueError(f"Unsupported model: {self.model_name}")
     
     def _get_field_schema(self, field_name: str) -> Dict[str, Any]:
-        """特定フィールドのスキーマを取得"""
+        """特定フィールドのスキーマを取得（Gemini対応）"""
         if field_name in self.schema.get("properties", {}):
+            field_property = self.schema["properties"][field_name]
+            
+            # definitionsを展開してインライン化
+            expanded_property = self._expand_definitions(field_property)
+            
             field_schema = {
                 "type": "object",
                 "properties": {
-                    field_name: self.schema["properties"][field_name]
+                    field_name: expanded_property
                 },
                 "required": [field_name] if field_name in self.schema.get("required", []) else []
             }
-            # 定義も含める
-            if "definitions" in self.schema:
-                field_schema["definitions"] = self.schema["definitions"]
             return field_schema
         return {}
+    
+    def _expand_definitions(self, schema_part: Dict[str, Any]) -> Dict[str, Any]:
+        """$refを展開してdefinitionsをインライン化"""
+        if isinstance(schema_part, dict):
+            # $refがある場合は定義を展開
+            if "$ref" in schema_part:
+                ref_path = schema_part["$ref"]
+                if ref_path.startswith("#/definitions/"):
+                    def_name = ref_path.replace("#/definitions/", "")
+                    definitions = self.schema.get("definitions", {})
+                    if def_name in definitions:
+                        # 再帰的に展開
+                        return self._expand_definitions(definitions[def_name])
+                return schema_part
+            else:
+                # 他のプロパティも再帰的に処理
+                expanded = {}
+                for key, value in schema_part.items():
+                    expanded[key] = self._expand_definitions(value)
+                return expanded
+        elif isinstance(schema_part, list):
+            return [self._expand_definitions(item) for item in schema_part]
+        else:
+            return schema_part
     
     def _create_field_prompt(self, field_name: str, dependency_context: str = "") -> str:
         """フィールド専用のプロンプトを作成"""
@@ -497,8 +523,10 @@ class PatentExtractor:
         return json.loads(response.choices[0].message.content)
     
     def _process_field_with_anthropic(self, pdf_path: str, prompt: str, schema: Dict) -> Dict[str, Any]:
-        """Anthropicでフィールドを処理"""
-        schema_json = json.dumps(schema, indent=2)
+        """Anthropicでフィールドを処理（スキーマ展開対応）"""
+        # スキーマからdefinitionsを除去してシンプル化
+        clean_schema = self._remove_definitions_from_schema(schema)
+        schema_json = json.dumps(clean_schema, indent=2)
         
         with open(pdf_path, "rb") as f:
             pdf_data = base64.b64encode(f.read()).decode("utf-8")
@@ -540,6 +568,19 @@ class PatentExtractor:
         )
         
         return self._extract_json_from_text(response.content[0].text)
+    
+    def _remove_definitions_from_schema(self, schema: Dict[str, Any]) -> Dict[str, Any]:
+        """スキーマからdefinitionsを除去"""
+        if isinstance(schema, dict):
+            clean_schema = {}
+            for key, value in schema.items():
+                if key != "definitions":
+                    clean_schema[key] = self._remove_definitions_from_schema(value)
+            return clean_schema
+        elif isinstance(schema, list):
+            return [self._remove_definitions_from_schema(item) for item in schema]
+        else:
+            return schema
     
     def _extract_json_from_text(self, text: str) -> Dict[str, Any]:
         """テキストからJSONを抽出（Anthropic用）"""
