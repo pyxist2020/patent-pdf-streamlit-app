@@ -163,30 +163,150 @@ class PatentExtractor:
                 }
                 
                 logger.info(f"Added field from schema: {field_name} (Wave {wave})")
+        
+        # definitions内の全ての型定義を処理対象に追加
+        definitions = self.schema.get("definitions", {})
+        
+        # Wave 2: 基本構造型（propertiesから直接参照される型）
+        basic_structure_types = [
+            "PersonType", "OrganizationType", "ClaimType", "SectionType", 
+            "ExamplesType", "ParagraphType", "TableType", "TableRefType", 
+            "ChemicalStructureType", "PatentChemicalCompoundType", "FigureRefType", 
+            "DesignatedCountriesType", "FTermsType", "ProteinSequenceType", "NucleicAcidSequenceType"
+        ]
+        
+        # Wave 3: 詳細構造型（間接的に重要な型）
+        detailed_structure_types = [
+            "MoleculeType", "TableRowType", "TableCellType", "ExampleType", 
+            "ImageRefType", "BiologicalSequenceRefType"
+        ]
+        
+        # Wave 4: 補助構造型（補助的な分類や参照型）
+        auxiliary_types = [
+            "RegionGroupType", "FTermType"
+        ]
+        
+        # 全ての型定義を追加
+        all_definition_types = [
+            (basic_structure_types, 2, "基本構造型"),
+            (detailed_structure_types, 3, "詳細構造型"),
+            (auxiliary_types, 4, "補助構造型")
+        ]
+        
+        for type_list, wave, category in all_definition_types:
+            for def_name in type_list:
+                if def_name in definitions and def_name not in self.field_definitions:
+                    dependencies = self._infer_dependencies(def_name, definitions[def_name])
+                    
+                    self.field_definitions[def_name] = {
+                        "description": f"{def_name}の詳細構造情報を抽出",
+                        "wave": wave,
+                        "dependencies": dependencies,
+                        "is_definition": True,
+                        "category": category
+                    }
+                    
+                    logger.info(f"Added {category}: {def_name} (Wave {wave})")
+        
+        # 追加で定義されていない型があるかチェック
+        all_definition_names = set(definitions.keys())
+        processed_definitions = set(basic_structure_types + detailed_structure_types + auxiliary_types)
+        missing_definitions = all_definition_names - processed_definitions
+        
+        if missing_definitions:
+            logger.warning(f"未処理の型定義が見つかりました: {missing_definitions}")
+            # 未処理の型定義も Wave 4 として追加
+            for def_name in missing_definitions:
+                if def_name not in self.field_definitions:
+                    dependencies = self._infer_dependencies(def_name, definitions[def_name])
+                    
+                    self.field_definitions[def_name] = {
+                        "description": f"{def_name}の構造情報を抽出",
+                        "wave": 4,
+                        "dependencies": dependencies,
+                        "is_definition": True,
+                        "category": "その他の型定義"
+                    }
+                    
+                    logger.info(f"Added missing definition: {def_name} (Wave 4)")
+        
+        logger.info(f"Total fields processed: {len(self.field_definitions)} (including {len(definitions)} type definitions)")
     
     def _infer_dependencies(self, field_name: str, field_schema: Dict) -> List[str]:
         """フィールドの依存関係を推定"""
         dependencies = []
         
-        # フィールド名に基づく推論
-        if "library" in field_name.lower():
-            dependencies.extend(["Claims", "Description"])
-        elif "continuation" in field_name.lower() or "family" in field_name.lower():
-            dependencies.append("FrontPage")
-        elif field_name in ["Examples"]:
-            dependencies.extend(["Description", "ChemicalStructureLibrary", "Tables"])
+        # プロパティレベルの依存関係
+        property_dependencies = {
+            # Library系は基本情報に依存
+            "ChemicalStructureLibrary": ["Claims", "Description"],
+            "BiologicalSequenceLibrary": ["Claims", "Description"],
+            # 継続系はフロントページに依存
+            "FrontPageContinuation": ["FrontPage"],
+            "PatentFamilyInformation": ["FrontPage"],
+            "InternationalSearchReport": ["FrontPage"],
+            # その他
+            "IndustrialApplicability": ["Description"],
+            "Figures": ["Description"],
+            "Tables": ["Description"]
+        }
+        
+        # 型定義レベルの依存関係
+        definition_dependencies = {
+            # 分子・化学関連
+            "MoleculeType": ["ChemicalStructureLibrary"],
+            "ChemicalStructureType": ["ChemicalStructureLibrary"],
+            "PatentChemicalCompoundType": ["ChemicalStructureLibrary"],
+            # 生物学的配列関連
+            "ProteinSequenceType": ["BiologicalSequenceLibrary"],
+            "NucleicAcidSequenceType": ["BiologicalSequenceLibrary"],
+            "BiologicalSequenceRefType": ["BiologicalSequenceLibrary"],
+            # 表関連
+            "TableType": ["Tables"],
+            "TableRowType": ["Tables"],
+            "TableCellType": ["Tables"],
+            "TableRefType": ["Tables"],
+            # 図関連
+            "FigureRefType": ["Figures"],
+            "ImageRefType": ["Figures"],
+            # セクション・構造関連
+            "ExampleType": ["Description"],
+            "ExamplesType": ["Description"],
+            "SectionType": ["Description"],
+            "ClaimType": ["Claims"],
+            "ParagraphType": ["Description", "Claims"],
+            # 人物・組織関連
+            "PersonType": ["FrontPage"],
+            "OrganizationType": ["FrontPage"],
+            # 地域・分類関連
+            "DesignatedCountriesType": ["FrontPageContinuation"],
+            "RegionGroupType": ["FrontPageContinuation"],
+            "FTermsType": ["FrontPageContinuation"],
+            "FTermType": ["FrontPageContinuation"]
+        }
+        
+        # 直接的な依存関係を取得
+        if field_name in property_dependencies:
+            dependencies.extend(property_dependencies[field_name])
+        elif field_name in definition_dependencies:
+            dependencies.extend(definition_dependencies[field_name])
         
         # スキーマ内の参照を確認
         field_str = json.dumps(field_schema)
-        if "ChemicalStructure" in field_str:
-            dependencies.append("ChemicalStructureLibrary")
-        if "BiologicalSequence" in field_str:
-            dependencies.append("BiologicalSequenceLibrary")
-        if "Table" in field_str:
-            dependencies.append("Tables")
-        if "Figure" in field_str:
-            dependencies.append("Figures")
-            
+        reference_mappings = {
+            "ChemicalStructure": "ChemicalStructureLibrary",
+            "BiologicalSequence": "BiologicalSequenceLibrary", 
+            "Table": "Tables",
+            "Figure": "Figures",
+            "MoleculeType": "ChemicalStructureLibrary",
+            "PersonType": "FrontPage",
+            "OrganizationType": "FrontPage"
+        }
+        
+        for ref_pattern, dependency in reference_mappings.items():
+            if ref_pattern in field_str:
+                dependencies.append(dependency)
+        
         return list(set(dependencies))  # 重複を除去
     
     def _get_env_var_name(self, model_name: str) -> str:
@@ -219,15 +339,25 @@ class PatentExtractor:
     
     def _get_field_schema(self, field_name: str) -> Dict[str, Any]:
         """特定フィールドのスキーマを取得（プロンプト用）"""
+        # 通常のプロパティから検索
         if field_name in self.schema.get("properties", {}):
             field_property = self.schema["properties"][field_name]
-            
-            # $refを展開してdefinitionsをインライン化
             expanded_property = self._expand_definitions(field_property)
             
             return {
                 "field_name": field_name,
                 "schema": expanded_property
+            }
+        
+        # definitions内の型定義から検索
+        if field_name in self.schema.get("definitions", {}):
+            field_definition = self.schema["definitions"][field_name]
+            expanded_definition = self._expand_definitions(field_definition)
+            
+            return {
+                "field_name": field_name,
+                "schema": expanded_definition,
+                "is_definition": True
             }
         
         return {
@@ -312,7 +442,9 @@ Important:
     
     def _create_field_prompt(self, field_name: str, dependency_context: str = "") -> str:
         """フィールド専用のプロンプトを作成"""
-        field_prompts = {
+        
+        # 基本プロパティのプロンプト
+        property_prompts = {
             "publicationIdentifier": """
             特許の公開番号（例：WO2020162638A1, JP2020-123456A, US10123456B2等）を抽出してください。
             フロントページの最上部に記載されている番号を確認してください。
@@ -417,7 +549,296 @@ Important:
             """
         }
         
-        base_prompt = field_prompts.get(field_name, f"{field_name}セクションを抽出してください。構造化されたJSONとして返してください。")
+        # 型定義のプロンプト
+        definition_prompts = {
+            # 基本構造型
+            "PersonType": """
+            人物情報の構造化データを抽出してください。
+            名前と住所を含む個人情報を正確に抽出してください。
+            """,
+            "OrganizationType": """
+            組織・団体情報の構造化データを抽出してください。
+            組織名と住所を含む法人情報を正確に抽出してください。
+            """,
+            "ClaimType": """
+            請求項の詳細構造を抽出してください。
+            請求項番号、テキスト、化学構造参照、生物学的配列参照、表参照を含めてください。
+            """,
+            "SectionType": """
+            セクションの構造化データを抽出してください。
+            タイトル、段落、化学構造、図、表への参照を含めてください。
+            """,
+            "ExamplesType": """
+            実施例セクションの構造を抽出してください。
+            個別の実施例の配列として構造化してください。
+            """,
+            "ExampleType": """
+            個別実施例の詳細構造を抽出してください。
+            実施例ID、タイトル、段落、化学構造、図、表への参照を含めてください。
+            """,
+            "ParagraphType": """
+            段落の構造化データを抽出してください。
+            段落IDと内容テキストを含めてください。
+            """,
+            "TableType": """
+            表の完全な構造と内容を抽出してください。
+            以下の詳細情報を含めてください：
+            - 表の基本情報（ID、番号、タイトル、位置）
+            - 表構造（行数、列数、ヘッダー情報、スパン情報）
+            - 行データの完全な構造
+            - セルデータ（内容、データタイプ、数値情報、フォーマット）
+            - 化学的コンテキスト（化合物参照、測定条件等）
+            - 統計情報（エラー表現、サンプルサイズ等）
+            - 参考情報（図表参照、実施例参照等）
+            """,
+            "TableRowType": """
+            表の行構造の詳細を抽出してください。
+            行番号、行タイプ、セルデータ、行コンテキストを含めてください。
+            """,
+            "TableCellType": """
+            表のセル構造の詳細を抽出してください。
+            列番号、内容、データタイプ、数値情報、フォーマット、参照情報を含めてください。
+            """,
+            "TableRefType": """
+            表への参照情報を抽出してください。
+            参照ID、表ID、番号、タイトル、コンテキストを含めてください。
+            """,
+            "ChemicalStructureType": """
+            化学構造の詳細情報を抽出してください。
+            識別子、化合物ID、画像参照、構造データ、特許コンテキストを含めてください。
+            """,
+            "PatentChemicalCompoundType": """
+            特許化学化合物の完全な情報を抽出してください。
+            分子構造情報と特許固有情報（化合物番号、活性データ、合成参照等）を含めてください。
+            """,
+            "MoleculeType": """
+            化学分子の詳細な構造情報を抽出してください。
+            以下の詳細情報を含めてください：
+            - 分子識別子（名前、IUPAC名、CAS番号、SMILES、InChI、InChI Key等）
+            - 分子式（分子式、実験式、構造式）
+            - 原子の詳細情報（元素、原子番号、座標、電荷、立体化学等）
+            - 結合情報（結合タイプ、結合次数、立体化学、芳香族性等）
+            - 環構造情報（環のサイズ、芳香族性、立体配座等）
+            - 官能基情報（ヒドロキシル、カルボニル、アミノ等の官能基）
+            - 立体化学情報（キラリティ、光学活性、立体異性体情報等）
+            - 分子特性（分子量、精密質量、双極子モーメント等）
+            可能な限り詳細な分子構造データを抽出してください。
+            """,
+            "FigureRefType": """
+            図への参照情報を抽出してください。
+            画像参照、キャプション、番号、タイプを含めてください。
+            """,
+            "ImageRefType": """
+            画像参照の詳細情報を抽出してください。
+            ID、参照ID、ソース、代替テキスト、タイプを含めてください。
+            """,
+            "ProteinSequenceType": """
+            タンパク質配列の詳細情報を抽出してください。
+            以下の詳細情報を含めてください：
+            - 配列識別子（名前、遺伝子名、生物種、UniProt ID等）
+            - アミノ酸配列（単文字コード）と長さ
+            - 分子特性（分子量、等電点等）
+            - 機能ドメイン（シグナルペプチド、触媒ドメイン、結合ドメイン等）
+            - 構造特徴（二次構造、ジスルフィド結合等）
+            - 翻訳後修飾（リン酸化、糖鎖修飾等）
+            - 特許における役割と活性データ
+            """,
+            "NucleicAcidSequenceType": """
+            核酸配列の詳細情報を抽出してください。
+            以下の詳細情報を含めてください：
+            - 配列識別子（名前、遺伝子名、生物種、GenBank ID等）
+            - 塩基配列（IUPAC コード）と長さ
+            - 配列タイプ（DNA、RNA、cDNA等）
+            - GC含量と補体配列
+            - 遺伝子要素（プロモーター、エンハンサー、コーディング領域等）
+            - 変異情報（置換、挿入、欠失等）
+            - 特許における役割（ベクター、プローブ、治療用等）
+            """,
+            "BiologicalSequenceRefType": """
+            生物学的配列への参照情報を抽出してください。
+            配列ID、配列タイプ、画像参照、表示形式、位置情報、コンテキストを含めてください。
+            """,
+            "DesignatedCountriesType": """
+            指定国情報の構造を抽出してください。
+            地域グループごとの国情報を含めてください。
+            """,
+            "RegionGroupType": """
+            地域グループの詳細情報を抽出してください。
+            国リストとタイプを含めてください。
+            """,
+            "FTermsType": """
+            F-Term分類の構造を抽出してください。
+            個別F-Termの配列として構造化してください。
+            """,
+            "FTermType": """
+            個別F-Termの詳細情報を抽出してください。
+            コードと説明を含めてください。
+            """
+        }
+        
+        # プロンプトを取得
+        if field_name in property_prompts:
+            base_prompt = property_prompts[field_name]
+        elif field_name in definition_prompts:
+            base_prompt = definition_prompts[field_name]
+        else:
+            base_prompt = f"{field_name}の構造化データを抽出してください。スキーマに従ってJSONとして返してください。"
+        
+        if dependency_context:
+            return f"{base_prompt}\n\n{dependency_context}"
+        
+        return base_prompt
+            "publicationIdentifier": """
+            特許の公開番号（例：WO2020162638A1, JP2020-123456A, US10123456B2等）を抽出してください。
+            フロントページの最上部に記載されている番号を確認してください。
+            """,
+            "FrontPage": """
+            PDFの最初のページ（フロントページ）から以下の情報を抽出してください：
+            - 公開番号、公開日、出願番号、出願日
+            - 発明者情報（名前、住所）
+            - 出願人情報（名前、住所）
+            - 代理人情報（もしあれば）
+            - 国際特許分類（IPC）
+            - 要約（Abstract）
+            - 優先権データがあれば含める
+            正確性を重視し、フロントページのレイアウトに従って情報を抽出してください。
+            """,
+            "Claims": """
+            特許請求の範囲（Claims）セクションから全ての請求項を抽出してください。
+            各請求項には番号とテキストを含めてください。
+            化学構造や表への参照も含めてください。
+            独立請求項と従属請求項の関係も明確にしてください。
+            生物学的配列への参照もあれば含めてください。
+            """,
+            "Description": """
+            発明の詳細な説明から以下のセクションを抽出してください：
+            - 技術分野（Technical Field）
+            - 背景技術（Background Art）
+            - 発明の概要（Summary of Invention）
+              - 解決すべき問題（Problem to Solve）
+              - 問題解決手段（Means for Solving Problem）
+              - 発明の効果（Effects of Invention）
+            - 発明の詳細な説明（Detailed Description of Invention）
+            - 実施例（Examples）
+            各セクションの構造と内容を維持し、階層構造を正確に抽出してください。
+            """,
+            "ChemicalStructureLibrary": """
+            特許文書全体から化学構造、化学式、化合物を抽出してください。
+            以下の情報を含めてください：
+            - 化合物番号、SMILES、分子式、化学名
+            - 原子と結合の詳細情報
+            - 立体化学情報
+            - 官能基情報
+            - 特許固有の情報（化合物番号、活性データ、合成参照等）
+            化学構造画像への参照も含めてください。
+            各化合物の用途や特性も記載があれば含めてください。
+            """,
+            "MoleculeType": """
+            化学分子の詳細な構造情報を抽出してください。
+            以下の情報を含めてください：
+            - 分子識別子（名前、IUPAC名、CAS番号、SMILES、InChI等）
+            - 分子式（分子式、実験式、構造式）
+            - 原子の詳細情報（元素、座標、電荷、立体化学等）
+            - 結合情報（結合タイプ、結合次数、立体化学等）
+            - 環構造情報（環のサイズ、芳香族性、立体配座等）
+            - 官能基情報（ヒドロキシル、カルボニル、アミノ等）
+            - 立体化学情報（キラリティ、光学活性等）
+            - 分子特性（分子量、双極子モーメント等）
+            可能な限り詳細な分子構造データを抽出してください。
+            """,
+            "BiologicalSequenceLibrary": """
+            特許文書全体から生物学的配列（タンパク質、DNA、RNA）を抽出してください。
+            以下の情報を含めてください：
+            - 配列ID（SEQ ID NO）、配列情報、生物種、機能情報
+            - タンパク質配列の場合：アミノ酸配列、分子量、等電点、機能ドメイン
+            - 核酸配列の場合：塩基配列、配列タイプ（DNA/RNA）、遺伝子要素
+            - 特許における役割（抗原、抗体、酵素等）
+            配列リストセクションがあれば優先的に参照してください。
+            """,
+            "ProteinSequenceType": """
+            タンパク質配列の詳細情報を抽出してください。
+            以下の情報を含めてください：
+            - 配列識別子（名前、遺伝子名、生物種、UniProt ID等）
+            - アミノ酸配列（単文字コード）と長さ
+            - 分子特性（分子量、等電点等）
+            - 機能ドメイン（シグナルペプチド、触媒ドメイン、結合ドメイン等）
+            - 構造特徴（二次構造、ジスルフィド結合等）
+            - 翻訳後修飾（リン酸化、糖鎖修飾等）
+            - 特許における役割と活性データ
+            """,
+            "NucleicAcidSequenceType": """
+            核酸配列の詳細情報を抽出してください。
+            以下の情報を含めてください：
+            - 配列識別子（名前、遺伝子名、生物種、GenBank ID等）
+            - 塩基配列（IUPAC コード）と長さ
+            - 配列タイプ（DNA、RNA、cDNA等）
+            - GC含量と補体配列
+            - 遺伝子要素（プロモーター、エンハンサー、コーディング領域等）
+            - 変異情報（置換、挿入、欠失等）
+            - 特許における役割（ベクター、プローブ、治療用等）
+            """,
+            "TableType": """
+            表の完全な構造と内容を抽出してください。
+            以下の情報を含めてください：
+            - 表の基本情報（ID、番号、タイトル、位置）
+            - 表構造（行数、列数、ヘッダー情報、スパン情報）
+            - セルデータ（内容、データタイプ、数値情報、フォーマット）
+            - 化学的コンテキスト（化合物参照、測定条件等）
+            - 統計情報（エラー表現、サンプルサイズ等）
+            - 参考情報（図表参照、実施例参照等）
+            表の完全な構造を保持して抽出してください。
+            """,
+            "Figures": """
+            特許文書全体から図を抽出してください。
+            図番号、キャプション、参照情報を含めてください。
+            図の説明文も可能な限り抽出してください。
+            図の種類（化学構造図、フローチャート、グラフ等）も識別してください。
+            """,
+            "Tables": """
+            特許文書全体から表を抽出してください。
+            以下の情報を完全に抽出してください：
+            - 表の構造、ヘッダー、データ、キャプション
+            - 表番号と位置情報
+            - 数値データの単位や注釈
+            - 化学化合物や生物学的データの場合は関連情報
+            - 表の種類（実験データ、比較データ、分析データ等）
+            - 統計情報があれば含める
+            """,
+            "IndustrialApplicability": """
+            産業上の利用可能性に関するセクションを抽出してください。
+            適用分野、利用方法、産業への影響を含めてください。
+            医薬品、化学品、バイオテクノロジー等の産業分野を特定してください。
+            """,
+            "InternationalSearchReport": """
+            国際調査報告書の情報を抽出してください。
+            以下の情報を含めてください：
+            - 引用文献リスト
+            - 調査分野
+            - 見解書の内容
+            - 特許性に関するコメント
+            表形式のデータがあれば含めてください。
+            """,
+            "PatentFamilyInformation": """
+            特許ファミリー情報を抽出してください。
+            以下の情報を含めてください：
+            - 関連特許の一覧
+            - ファミリー構成
+            - 優先権情報
+            - 各国での出願状況
+            表形式のデータがあれば含めてください。
+            """,
+            "FrontPageContinuation": """
+            フロントページの続き情報を抽出してください。
+            以下の情報を含めてください：
+            - 指定国情報
+            - F-Term分類
+            - その他の分類情報
+            - 追加の発明者情報
+            - 要約の続き
+            """
+        }
+        
+        base_prompt = field_prompts.get(field_name, f"{field_name}セクション/構造を抽出してください。構造化されたJSONとして返してください。")
         
         if dependency_context:
             return f"{base_prompt}\n\n{dependency_context}"
