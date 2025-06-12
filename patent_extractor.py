@@ -163,44 +163,124 @@ class PatentExtractor:
             raise ValueError(f"Unsupported model: {self.model_name}")
     
     def _get_field_schema(self, field_name: str) -> Dict[str, Any]:
-        """特定フィールドのスキーマを取得（Gemini対応）"""
+        """特定フィールドの構造化出力対応スキーマを取得"""
         if field_name in self.schema.get("properties", {}):
             field_property = self.schema["properties"][field_name]
             
-            # definitionsを展開してインライン化
+            # $refを展開してdefinitionsをインライン化
             expanded_property = self._expand_definitions(field_property)
+            
+            # 構造化出力用にクリーンアップ
+            clean_property = self._clean_for_structured_output(expanded_property)
             
             field_schema = {
                 "type": "object",
                 "properties": {
-                    field_name: expanded_property
+                    field_name: clean_property
                 },
-                "required": [field_name] if field_name in self.schema.get("required", []) else []
+                "required": [field_name] if field_name in self.schema.get("required", []) else [],
+                "additionalProperties": False
             }
             return field_schema
-        return {}
+        
+        # 未定義フィールド用の汎用スキーマ
+        return {
+            "type": "object",
+            "properties": {
+                field_name: {
+                    "type": "object",
+                    "properties": {
+                        "content": {"type": "string"}
+                    },
+                    "required": ["content"],
+                    "additionalProperties": False
+                }
+            },
+            "required": [field_name],
+            "additionalProperties": False
+        }
     
-    def _expand_definitions(self, schema_part: Dict[str, Any]) -> Dict[str, Any]:
+    def _expand_definitions(self, schema_part: Any) -> Any:
         """$refを展開してdefinitionsをインライン化"""
         if isinstance(schema_part, dict):
-            # $refがある場合は定義を展開
             if "$ref" in schema_part:
                 ref_path = schema_part["$ref"]
                 if ref_path.startswith("#/definitions/"):
                     def_name = ref_path.replace("#/definitions/", "")
                     definitions = self.schema.get("definitions", {})
                     if def_name in definitions:
-                        # 再帰的に展開
-                        return self._expand_definitions(definitions[def_name])
+                        # 循環参照を避けるため、すでに展開中のものは簡素化
+                        if not hasattr(self, '_expanding'):
+                            self._expanding = set()
+                        
+                        if def_name in self._expanding:
+                            return {"type": "object", "additionalProperties": False}
+                        
+                        self._expanding.add(def_name)
+                        result = self._expand_definitions(definitions[def_name])
+                        self._expanding.discard(def_name)
+                        return result
                 return schema_part
             else:
-                # 他のプロパティも再帰的に処理
                 expanded = {}
                 for key, value in schema_part.items():
                     expanded[key] = self._expand_definitions(value)
                 return expanded
         elif isinstance(schema_part, list):
             return [self._expand_definitions(item) for item in schema_part]
+        else:
+            return schema_part
+    
+    def _clean_for_structured_output(self, schema_part: Any) -> Any:
+        """構造化出力用にスキーマをクリーンアップ"""
+        if isinstance(schema_part, dict):
+            clean_schema = {}
+            
+            # 構造化出力で認識されないフィールドを除去
+            excluded_fields = {
+                "title", "description", "$schema", "definitions", 
+                "format", "pattern", "minimum", "maximum", "minItems", 
+                "maxItems", "minLength", "maxLength", "minProperties", 
+                "maxProperties", "patternProperties", "const", "default"
+            }
+            
+            for key, value in schema_part.items():
+                if key not in excluded_fields:
+                    if key == "type":
+                        clean_schema[key] = value
+                    elif key in ["properties", "items", "required"]:
+                        clean_schema[key] = self._clean_for_structured_output(value)
+                    elif key == "enum":
+                        # enumは保持（OpenAI/Geminiで重要）
+                        clean_schema[key] = value
+                    elif key == "allOf":
+                        # allOfを統合
+                        if isinstance(value, list) and len(value) > 0:
+                            # 最初の要素をベースに統合
+                            merged = self._clean_for_structured_output(value[0])
+                            for item in value[1:]:
+                                cleaned_item = self._clean_for_structured_output(item)
+                                if "properties" in cleaned_item:
+                                    if "properties" not in merged:
+                                        merged["properties"] = {}
+                                    merged["properties"].update(cleaned_item["properties"])
+                                if "required" in cleaned_item:
+                                    if "required" not in merged:
+                                        merged["required"] = []
+                                    merged["required"].extend(cleaned_item["required"])
+                            return merged
+                    elif key == "oneOf" or key == "anyOf":
+                        # oneOf/anyOfは最初の要素を使用
+                        if isinstance(value, list) and len(value) > 0:
+                            return self._clean_for_structured_output(value[0])
+            
+            # additionalPropertiesを明示的に設定
+            if clean_schema.get("type") == "object" and "additionalProperties" not in clean_schema:
+                clean_schema["additionalProperties"] = False
+            
+            return clean_schema
+        elif isinstance(schema_part, list):
+            return [self._clean_for_structured_output(item) for item in schema_part]
         else:
             return schema_part
     
@@ -456,7 +536,8 @@ class PatentExtractor:
             return f"データ構造: {list(data.keys())[:5]}"  # 最初の5つのキーのみ
     
     def _process_field_with_gemini(self, pdf_path: str, prompt: str, schema: Dict) -> Dict[str, Any]:
-        """Geminiでフィールドを処理"""
+        """Geminiでフィールドを処理（シンプルスキーマ対応）"""
+        # Geminiの構造化出力用に簡素化されたスキーマを使用
         generation_config = {
             "temperature": self.temperature,
             "max_output_tokens": self.max_tokens,
@@ -467,7 +548,7 @@ class PatentExtractor:
         model = self.client.GenerativeModel(
             model_name=self.model_name,
             generation_config=generation_config,
-            system_instruction="You are a patent analysis assistant. Extract specific field information from the patent PDF according to the provided JSON schema. Focus on accuracy and completeness."
+            system_instruction="You are a patent analysis assistant. Extract specific field information from the patent PDF and return valid JSON."
         )
         
         with open(pdf_path, "rb") as f:
@@ -475,7 +556,7 @@ class PatentExtractor:
         
         response = model.generate_content(
             contents=[
-                prompt,
+                f"{prompt}\n\nReturn the result in the specified JSON format.",
                 {"mime_type": "application/pdf", "data": pdf_data}
             ]
         )
@@ -483,7 +564,7 @@ class PatentExtractor:
         return json.loads(response.text)
     
     def _process_field_with_openai(self, pdf_path: str, prompt: str, schema: Dict) -> Dict[str, Any]:
-        """OpenAIでフィールドを処理"""
+        """OpenAIでフィールドを処理（構造化出力使用）"""
         with open(pdf_path, "rb") as f:
             pdf_data = base64.b64encode(f.read()).decode("utf-8")
         
@@ -492,17 +573,20 @@ class PatentExtractor:
             messages=[
                 {
                     "role": "system", 
-                    "content": "You are a patent analysis assistant. Extract specific field information from patents according to the provided JSON schema. Focus on accuracy and completeness."
+                    "content": "You are a patent analysis assistant. Extract specific field information from patents according to the provided JSON schema."
                 },
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": prompt},
                         {
-                            "type": "file",
-                            "file": {
-                                "filename": f"{pdf_path}",
-                                "file_data": f"data:application/pdf;base64,{pdf_data}"
+                            "type": "text", 
+                            "text": prompt
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:application/pdf;base64,{pdf_data}",
+                                "detail": "high"
                             }
                         }
                     ]
@@ -513,7 +597,7 @@ class PatentExtractor:
             response_format={
                 "type": "json_schema",
                 "json_schema": {
-                    "name": "field_extraction",
+                    "name": "patent_field_extraction",
                     "schema": schema,
                     "strict": True
                 }
@@ -523,17 +607,16 @@ class PatentExtractor:
         return json.loads(response.choices[0].message.content)
     
     def _process_field_with_anthropic(self, pdf_path: str, prompt: str, schema: Dict) -> Dict[str, Any]:
-        """Anthropicでフィールドを処理（スキーマ展開対応）"""
-        # スキーマからdefinitionsを除去してシンプル化
-        clean_schema = self._remove_definitions_from_schema(schema)
-        schema_json = json.dumps(clean_schema, indent=2)
+        """Anthropicでフィールドを処理（構造化出力風）"""
+        # AnthropicはJSON Schemaベースの構造化出力は未対応のため、プロンプトで指定
+        schema_json = json.dumps(schema, indent=2)
         
         with open(pdf_path, "rb") as f:
             pdf_data = base64.b64encode(f.read()).decode("utf-8")
         
         response = self.client.messages.create(
             model=self.model_name,
-            system="You are a patent analysis assistant. Extract specific field information from the patent PDF according to the provided JSON schema. Focus on accuracy and completeness.",
+            system="You are a patent analysis assistant. Extract specific field information from the patent PDF according to the provided JSON schema. Return ONLY valid JSON that exactly matches the schema structure.",
             max_tokens=self.max_tokens,
             temperature=self.temperature,
             messages=[
@@ -545,13 +628,17 @@ class PatentExtractor:
                             "text": f"""
                             {prompt}
                             
-                            JSON SCHEMA:
+                            REQUIRED JSON SCHEMA (you must follow this exactly):
                             ```json
                             {schema_json}
                             ```
                             
-                            Extract the specified field information from the patent PDF and format it according to this schema.
-                            Return ONLY valid JSON that conforms to the schema without any explanations or markdown formatting.
+                            Important: 
+                            1. Return ONLY valid JSON that conforms to the above schema
+                            2. Include all required fields
+                            3. Use the exact property names and types as specified
+                            4. Do not include any explanations or markdown formatting
+                            5. Ensure all arrays and objects follow the schema structure
                             """
                         },
                         {
@@ -568,19 +655,6 @@ class PatentExtractor:
         )
         
         return self._extract_json_from_text(response.content[0].text)
-    
-    def _remove_definitions_from_schema(self, schema: Dict[str, Any]) -> Dict[str, Any]:
-        """スキーマからdefinitionsを除去"""
-        if isinstance(schema, dict):
-            clean_schema = {}
-            for key, value in schema.items():
-                if key != "definitions":
-                    clean_schema[key] = self._remove_definitions_from_schema(value)
-            return clean_schema
-        elif isinstance(schema, list):
-            return [self._remove_definitions_from_schema(item) for item in schema]
-        else:
-            return schema
     
     def _extract_json_from_text(self, text: str) -> Dict[str, Any]:
         """テキストからJSONを抽出（Anthropic用）"""
