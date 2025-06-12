@@ -4,9 +4,16 @@ import os
 import tempfile
 import time
 from pathlib import Path
-import plotly.express as px
-import plotly.graph_objects as go
 import pandas as pd
+
+# Plotlyの安全なインポート
+try:
+    import plotly.express as px
+    import plotly.graph_objects as go
+    PLOTLY_AVAILABLE = True
+except ImportError:
+    PLOTLY_AVAILABLE = False
+    st.warning("⚠️ Plotly not available. Using basic charts instead.")
 
 # 新しい並列処理システムをインポート
 try:
@@ -14,7 +21,7 @@ try:
     EXTRACTOR_AVAILABLE = True
 except ImportError:
     EXTRACTOR_AVAILABLE = False
-    st.error("❌ 抽出エンジンが見つかりません。patent_extractor.py を確認してください。")
+    st.error("❌ 抽出エンジンが見つかりません。patent_extractor.py をアップロードしてください。")
 
 # ページ設定
 st.set_page_config(
@@ -271,12 +278,16 @@ def display_performance_metrics(processing_metadata):
             ])
             
             # グラフ表示
-            fig = px.bar(timing_df, x="フィールド", y="処理時間(秒)", 
-                        title="フィールド別処理時間",
-                        color="処理時間(秒)",
-                        color_continuous_scale="viridis")
-            fig.update_layout(xaxis_tickangle=-45)
-            st.plotly_chart(fig, use_container_width=True)
+            if PLOTLY_AVAILABLE:
+                fig = px.bar(timing_df, x="フィールド", y="処理時間(秒)", 
+                            title="フィールド別処理時間",
+                            color="処理時間(秒)",
+                            color_continuous_scale="viridis")
+                fig.update_layout(xaxis_tickangle=-45)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                # Streamlit標準のチャート
+                st.bar_chart(timing_df.set_index("フィールド"))
             
             # テーブル表示
             st.dataframe(timing_df, use_container_width=True)
@@ -376,7 +387,22 @@ st.title("🚀 並列特許PDF構造化ツール")
 st.markdown("**AI並列処理による高速特許データ抽出システム**")
 
 if not EXTRACTOR_AVAILABLE:
-    st.error("❌ 抽出エンジンが利用できません。システム管理者に連絡してください。")
+    st.error("❌ 抽出エンジンが利用できません。")
+    st.info("💡 **解決方法**: patent_extractor.py ファイルをアップロードするか、リポジトリに追加してください。")
+    
+    # ファイルアップローダーを追加
+    st.subheader("📁 patent_extractor.py をアップロード")
+    uploaded_extractor = st.file_uploader("patent_extractor.py", type=["py"])
+    if uploaded_extractor:
+        try:
+            # ファイルを保存
+            with open("patent_extractor.py", "wb") as f:
+                f.write(uploaded_extractor.getbuffer())
+            st.success("✅ patent_extractor.py をアップロードしました。ページを再読み込みしてください。")
+            st.button("🔄 ページ再読み込み", on_click=st.rerun)
+        except Exception as e:
+            st.error(f"❌ ファイル保存エラー: {e}")
+    
     st.stop()
 
 # サイドバー設定
