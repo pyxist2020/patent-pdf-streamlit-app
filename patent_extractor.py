@@ -554,8 +554,70 @@ Include row number, row type, cell data, and row context.""",
 Include column number, content, data type, numerical information, format, and reference information.""",
             "TableRefType": """Extract reference information to tables.
 Include reference ID, table ID, number, title, and context.""",
-            "ChemicalStructureType": """Extract detailed information of chemical structures.
-Include identifier, compound ID, image reference, structure data, and patent context.""",
+            "ChemicalGraphType": """Extract complete graph representation of chemical molecules.
+
+EXAMPLE STRUCTURE for simple molecule (methanol CH3OH):
+{
+  "graph_metadata": {
+    "graph_id": "mol_001",
+    "molecule_name": "methanol",
+    "smiles": "CO",
+    "molecular_formula": "CH4O",
+    "graph_type": "molecular_graph"
+  },
+  "nodes": [
+    {
+      "node_id": "C1",
+      "atom_properties": {
+        "element": "C",
+        "atomic_number": 6,
+        "formal_charge": 0,
+        "hybridization": "sp3",
+        "implicit_hydrogens": 3
+      },
+      "node_type": "atom"
+    },
+    {
+      "node_id": "O1", 
+      "atom_properties": {
+        "element": "O",
+        "atomic_number": 8,
+        "formal_charge": 0,
+        "hybridization": "sp3",
+        "implicit_hydrogens": 1
+      },
+      "node_type": "atom"
+    }
+  ],
+  "edges": [
+    {
+      "edge_id": "bond_001",
+      "source_node": "C1",
+      "target_node": "O1",
+      "bond_properties": {
+        "bond_order": 1,
+        "bond_type": "covalent"
+      }
+    }
+  ],
+  "graph_properties": {
+    "node_count": 2,
+    "edge_count": 1,
+    "connectivity": "connected",
+    "cyclic": false
+  }
+}
+
+REQUIREMENTS:
+1. Assign unique IDs to all nodes (atoms) and edges (bonds)
+2. Ensure source_node and target_node in edges reference valid node_id values
+3. Include all heavy atoms (non-hydrogen) as nodes
+4. Map all chemical bonds as edges with proper connectivity
+5. Identify ring systems and functional groups
+6. Extract stereochemical information where present
+7. Generate adjacency matrix for graph analysis
+
+Focus on creating a mathematically correct graph where nodes represent atoms and edges represent bonds, with all connectivity relationships properly captured.""",
             "PatentChemicalCompoundType": """Extract complete information of patent chemical compounds.
 Include molecular structure information and patent-specific information (compound numbers, activity data, synthesis references, etc.).""",
             "MoleculeType": """Extract detailed structural information of chemical molecules.
