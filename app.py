@@ -4,29 +4,15 @@ import os
 import tempfile
 import time
 from pathlib import Path
-import pandas as pd
+import threading
+import queue
 
-# Plotlyの安全なインポート
-try:
-    import plotly.express as px
-    import plotly.graph_objects as go
-    PLOTLY_AVAILABLE = True
-except ImportError:
-    PLOTLY_AVAILABLE = False
-    st.warning("⚠️ Plotly not available. Using basic charts instead.")
-
-# 新しい並列処理システムをインポート
-try:
-    from patent_extractor import PatentExtractor
-    EXTRACTOR_AVAILABLE = True
-except ImportError:
-    EXTRACTOR_AVAILABLE = False
-    st.error("❌ 抽出エンジンが見つかりません。patent_extractor.py をアップロードしてください。")
+from streaming_patent_extractor import StreamingPatentExtractor
 
 # ページ設定
 st.set_page_config(
-    page_title="🚀 並列特許PDF構造化ツール",
-    page_icon="⚡",
+    page_title="特許PDF構造化ツール（ストリーミング対応）",
+    page_icon="📄",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -34,74 +20,132 @@ st.set_page_config(
 # カスタムCSS
 st.markdown("""
 <style>
-    .metric-row {
-        display: flex;
-        gap: 20px;
-        margin: 20px 0;
+    .main .block-container {
+        padding-top: 2rem;
     }
-    .metric-card {
-        flex: 1;
-        padding: 15px;
-        border-radius: 8px;
-        text-align: center;
+    .stButton button {
+        width: 100%;
+    }
+    .json-display {
         border: 1px solid #e0e0e0;
-        background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+        border-radius: 5px;
+        padding: 10px;
+        background-color: #f5f5f5;
+        height: 500px;
+        overflow: auto;
+        font-family: monospace;
+        white-space: pre-wrap;
     }
-    .performance-info {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
-        padding: 20px;
-        border-radius: 10px;
-        margin: 15px 0;
+    .streaming-output {
+        border: 1px solid #d0e0ff;
+        border-radius: 5px;
+        padding: 15px;
+        background-color: #f8fafe;
+        height: 400px;
+        overflow-y: auto;
+        font-family: monospace;
+        white-space: pre-wrap;
+        line-height: 1.4;
     }
-    .domain-badge {
-        display: inline-block;
-        padding: 5px 15px;
-        border-radius: 20px;
-        background: #4CAF50;
-        color: white;
+    .stat-box {
+        padding: 10px;
+        border-radius: 5px;
+        margin-bottom: 10px;
+        text-align: center;
+    }
+    .blue-stat {
+        background-color: #f0f5ff;
+        border: 1px solid #d0e0ff;
+    }
+    .green-stat {
+        background-color: #f0fff5;
+        border: 1px solid #d0ffe0;
+    }
+    .orange-stat {
+        background-color: #fff5f0;
+        border: 1px solid #ffe0d0;
+    }
+    .title-area {
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+    .progress-indicator {
+        padding: 10px;
+        border-radius: 5px;
+        background-color: #e8f4f8;
+        border: 1px solid #bee5eb;
+        margin: 10px 0;
+    }
+    .streaming-status {
         font-weight: bold;
-        margin: 5px;
-    }
-    .stProgress .st-bo {
-        background-color: #667eea;
-    }
-    .success-metrics {
-        background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
-        color: white;
-        padding: 15px;
-        border-radius: 8px;
-        text-align: center;
-    }
-    .error-metrics {
-        background: linear-gradient(135deg, #ff416c 0%, #ff4b2b 100%);
-        color: white;
-        padding: 15px;
-        border-radius: 8px;
-        text-align: center;
+        color: #0066cc;
+        margin-bottom: 10px;
     }
 </style>
 """, unsafe_allow_html=True)
 
-# デフォルトモデルオプション
+# モデルオプション（デフォルトの選択肢）
 DEFAULT_MODEL_OPTIONS = {
-    "Google Gemini": ["gemini-1.5-pro", "gemini-1.5-flash", "gemini-1.0-pro"],
-    "OpenAI": ["gpt-4o", "gpt-4-vision-preview", "gpt-4-turbo", "gpt-3.5-turbo"],
-    "Anthropic": ["claude-3-5-sonnet-20241022", "claude-3-opus-20240229", "claude-3-sonnet-20240229", "claude-3-haiku-20240307"]
+    "Google Gemini": ["gemini-1.5-pro", "gemini-1.5-flash"],
+    "OpenAI": ["gpt-4o", "gpt-4-vision-preview"],
+    "Anthropic": ["claude-3-opus-20240229", "claude-3-sonnet-20240229", "claude-3-haiku-20240307"]
 }
 
-def get_api_key_from_env(provider):
-    """環境変数からAPIキーを取得"""
-    env_vars = {
-        "Google Gemini": "GOOGLE_API_KEY",
-        "OpenAI": "OPENAI_API_KEY", 
-        "Anthropic": "ANTHROPIC_API_KEY"
-    }
-    return os.environ.get(env_vars.get(provider, ""), "")
+# セッション状態の初期化
+if 'streaming_output' not in st.session_state:
+    st.session_state.streaming_output = ""
+if 'is_processing' not in st.session_state:
+    st.session_state.is_processing = False
+if 'processing_complete' not in st.session_state:
+    st.session_state.processing_complete = False
+if 'final_result' not in st.session_state:
+    st.session_state.final_result = None
+if 'chunk_count' not in st.session_state:
+    st.session_state.chunk_count = 0
+if 'start_time' not in st.session_state:
+    st.session_state.start_time = None
 
+# 環境変数からAPIキーを取得する関数
+def get_api_key_from_env(provider):
+    if provider == "Google Gemini":
+        return os.environ.get("GOOGLE_API_KEY", "")
+    elif provider == "OpenAI":
+        return os.environ.get("OPENAI_API_KEY", "")
+    elif provider == "Anthropic":
+        return os.environ.get("ANTHROPIC_API_KEY", "")
+    return ""
+
+# プロバイダーからモデル名のプレフィックスを推定する関数
+def get_model_prefix(provider):
+    if provider == "Google Gemini":
+        return "gemini-"
+    elif provider == "OpenAI":
+        return "gpt-"
+    elif provider == "Anthropic":
+        return "claude-"
+    return ""
+
+# モデル名が有効かチェックする関数
+def is_valid_model_name(model_name, provider):
+    """モデル名が指定されたプロバイダーに適しているかをチェック"""
+    if not model_name:
+        return False
+    
+    model_lower = model_name.lower()
+    
+    if provider == "Google Gemini":
+        return "gemini" in model_lower
+    elif provider == "OpenAI":
+        return "gpt" in model_lower or "openai" in model_lower
+    elif provider == "Anthropic":
+        return "claude" in model_lower
+    
+    return True
+
+# APIから利用可能なモデル一覧を取得する関数
 @st.cache_data(ttl=3600)
 def fetch_available_models(provider, api_key):
-    """APIから利用可能なモデル一覧を取得（キャッシュ付き）"""
+    """APIから利用可能なモデル一覧を取得"""
     try:
         if not api_key:
             return []
@@ -118,25 +162,25 @@ def fetch_available_models(provider, api_key):
             client = OpenAI(api_key=api_key)
             models = client.models.list()
             model_names = [model.id for model in models.data 
-                          if any(keyword in model.id.lower() for keyword in ['gpt', 'vision', 'turbo'])]
+                          if 'gpt' in model.id.lower() or 'vision' in model.id.lower()]
             return sorted(model_names, reverse=True)
         
         elif provider == "Anthropic":
-            # AnthropicのAPIはモデル一覧を提供していないため、既知のモデルを返す
             return [
-                "claude-3-5-sonnet-20241022",
-                "claude-3-5-haiku-20241022", 
                 "claude-3-opus-20240229",
-                "claude-3-sonnet-20240229",
-                "claude-3-haiku-20240307"
+                "claude-3-sonnet-20240229", 
+                "claude-3-haiku-20240307",
+                "claude-3-5-sonnet-20241022",
+                "claude-3-5-haiku-20241022"
             ]
         
         return []
         
     except Exception as e:
-        st.warning(f"⚠️ モデル一覧の取得に失敗: {str(e)}")
+        st.error(f"モデル一覧の取得に失敗しました: {str(e)}")
         return []
 
+# モデル一覧を取得してキャッシュする関数
 def get_models_with_cache(provider, api_key):
     """キャッシュを使用してモデル一覧を取得"""
     if not api_key:
@@ -144,564 +188,432 @@ def get_models_with_cache(provider, api_key):
     
     try:
         available_models = fetch_available_models(provider, api_key)
-        return available_models if available_models else DEFAULT_MODEL_OPTIONS.get(provider, [])
+        if available_models:
+            return available_models
+        else:
+            return DEFAULT_MODEL_OPTIONS.get(provider, [])
     except:
         return DEFAULT_MODEL_OPTIONS.get(provider, [])
 
+# JSONスキーマをロードする関数
 def load_schema(file_path=None, file_content=None):
-    """スキーマファイルを読み込み"""
     try:
         if file_path and os.path.exists(file_path):
             with open(file_path, "r", encoding="utf-8") as f:
-                schema = json.load(f)
-                st.success(f"✅ スキーマ読み込み完了: {len(schema.get('properties', {}))} プロパティ")
-                return schema
+                return json.load(f)
         elif file_content:
-            schema = json.loads(file_content)
-            st.success(f"✅ スキーマ解析完了: {len(schema.get('properties', {}))} プロパティ")
-            return schema
+            return json.loads(file_content)
         return {}
     except Exception as e:
-        st.error(f"❌ スキーマ読み込みエラー: {str(e)}")
+        st.error(f"JSONスキーマの読み込みエラー: {str(e)}")
         return {}
 
-def detect_domain_only(pdf_path, model_name, api_key):
-    """ドメイン検出のみ実行"""
-    try:
-        if not EXTRACTOR_AVAILABLE:
-            return {"error": "抽出エンジンが利用できません"}
-            
-        extractor = PatentExtractor(
-            model_name=model_name,
-            api_key=api_key,
-            temperature=0.1,
-            max_tokens=2048
-        )
-        return extractor.detect_domain_parallel(pdf_path)
-    except Exception as e:
-        return {"error": str(e)}
-
-def process_pdf_parallel(pdf_path, model_name, api_key, schema, prompt=None, temperature=0.1, max_tokens=8192, max_workers=8):
-    """並列処理でPDFを処理"""
-    try:
-        if not EXTRACTOR_AVAILABLE:
-            return {"error": "抽出エンジンが利用できません"}
-            
-        extractor = PatentExtractor(
-            model_name=model_name,
-            api_key=api_key,
-            json_schema=schema,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            max_workers=max_workers
-        )
-        return extractor.process_patent_parallel(pdf_path)
-    except Exception as e:
-        return {"error": str(e)}
-
+# PDFファイルを一時ファイルとして保存する関数
 def save_upload_file(uploaded_file):
-    """アップロードファイルを一時保存"""
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             tmp.write(uploaded_file.getbuffer())
             return tmp.name
     except Exception as e:
-        st.error(f"❌ ファイル保存エラー: {str(e)}")
+        st.error(f"ファイル保存エラー: {str(e)}")
         return None
 
-def display_domain_info(domain_info):
-    """ドメイン情報を表示"""
-    if not domain_info or "error" in domain_info:
-        return
-    
-    domain = domain_info.get("primary_domain", "unknown")
-    
-    # ドメインバッジ
-    domain_colors = {
-        "chemical": "#FF6B6B",
-        "biotechnology": "#4ECDC4", 
-        "mechanical": "#45B7D1",
-        "electrical": "#96CEB4",
-        "software": "#FFEAA7",
-        "general": "#DDA0DD"
-    }
-    
-    color = domain_colors.get(domain, "#DDA0DD")
-    st.markdown(f"""
-    <div style="background: {color}; color: white; padding: 10px; border-radius: 5px; text-align: center; margin: 10px 0;">
-        🔍 検出ドメイン: <strong>{domain.upper()}</strong>
-    </div>
-    """, unsafe_allow_html=True)
-
-def display_performance_metrics(processing_metadata):
-    """パフォーマンス指標を表示"""
-    if not processing_metadata:
-        return
-    
-    st.markdown("### 📊 処理パフォーマンス")
-    
-    total_time = processing_metadata.get("total_time_seconds", 0)
-    workers = processing_metadata.get("parallel_workers", 1)
-    stats = processing_metadata.get("processing_stats", {})
-    field_timing = processing_metadata.get("field_timing", {})
-    
-    # メトリクス表示
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric("⏱️ 総処理時間", f"{total_time:.1f}秒")
-    
-    with col2:
-        st.metric("🚀 並列ワーカー", f"{workers}")
-    
-    with col3:
-        successful = stats.get("successful_fields", 0)
-        total = stats.get("total_fields", 0)
-        success_rate = (successful / max(1, total)) * 100
-        st.metric("✅ 成功率", f"{success_rate:.1f}%")
-    
-    with col4:
-        if field_timing:
-            estimated_sequential = sum(field_timing.values())
-            speedup = estimated_sequential / total_time if total_time > 0 else 1
-            st.metric("⚡ 高速化", f"{speedup:.1f}x")
-        else:
-            st.metric("⚡ 高速化", "N/A")
-    
-    # 詳細タイミング
-    if field_timing:
-        with st.expander("📈 フィールド別処理時間"):
-            # データフレーム作成
-            timing_df = pd.DataFrame([
-                {"フィールド": field, "処理時間(秒)": timing}
-                for field, timing in sorted(field_timing.items(), key=lambda x: x[1], reverse=True)
-            ])
-            
-            # グラフ表示
-            if PLOTLY_AVAILABLE:
-                fig = px.bar(timing_df, x="フィールド", y="処理時間(秒)", 
-                            title="フィールド別処理時間",
-                            color="処理時間(秒)",
-                            color_continuous_scale="viridis")
-                fig.update_layout(xaxis_tickangle=-45)
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                # Streamlit標準のチャート
-                st.bar_chart(timing_df.set_index("フィールド"))
-            
-            # テーブル表示
-            st.dataframe(timing_df, use_container_width=True)
-
-def display_validation_results(result, schema):
-    """バリデーション結果を表示"""
-    if not schema:
-        return
-    
-    st.markdown("### 🔍 スキーマ検証結果")
-    
-    # 必須フィールドチェック
-    required_fields = schema.get("required", [])
-    schema_properties = schema.get("properties", {})
-    
-    present_required = [f for f in required_fields if f in result and result[f] is not None]
-    missing_required = [f for f in required_fields if f not in result or result[f] is None]
-    
-    optional_present = [f for f in schema_properties if f not in required_fields and f in result and result[f] is not None]
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.markdown(f"""
-        <div class="success-metrics">
-            <h4>✅ 必須フィールド</h4>
-            <h2>{len(present_required)}/{len(required_fields)}</h2>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col2:
-        st.markdown(f"""
-        <div class="metric-card">
-            <h4>📋 オプション</h4>
-            <h2>{len(optional_present)}</h2>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col3:
-        total_coverage = (len(present_required) + len(optional_present)) / max(1, len(schema_properties)) * 100
-        coverage_class = "success-metrics" if total_coverage > 80 else "error-metrics" if total_coverage < 50 else "metric-card"
-        st.markdown(f"""
-        <div class="{coverage_class}">
-            <h4>📊 カバレッジ</h4>
-            <h2>{total_coverage:.1f}%</h2>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # 不足フィールド
-    if missing_required:
-        with st.expander("❌ 不足必須フィールド"):
-            for field in missing_required:
-                st.error(f"• {field}")
-
-def display_extraction_summary(result):
-    """抽出結果サマリーを表示"""
-    clean_result = {k: v for k, v in result.items() if not k.startswith('_')}
-    
-    st.markdown("### 📋 抽出結果サマリー")
-    
-    # フィールド統計
-    total_fields = len(clean_result)
-    successful_fields = len([v for v in clean_result.values() if not (isinstance(v, dict) and 'error' in v)])
-    error_fields = total_fields - successful_fields
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.metric("📊 総フィールド", total_fields)
-    with col2:
-        st.metric("✅ 成功", successful_fields)
-    with col3:
-        st.metric("❌ エラー", error_fields)
-    
-    # 主要フィールドの内容チェック
-    key_fields_status = {}
-    key_fields = ["publicationIdentifier", "FrontPage", "Claims", "Description", "ChemicalStructureLibrary", "BiologicalSequenceLibrary"]
-    
-    for field in key_fields:
-        if field in clean_result:
-            value = clean_result[field]
-            if isinstance(value, dict) and "error" in value:
-                key_fields_status[field] = "❌ エラー"
-            elif value is None:
-                key_fields_status[field] = "⚪ 空"
-            else:
-                key_fields_status[field] = "✅ 成功"
-        else:
-            key_fields_status[field] = "➖ なし"
-    
-    with st.expander("🔍 主要フィールド状況"):
-        for field, status in key_fields_status.items():
-            st.write(f"**{field}**: {status}")
-
-# メインUI
-st.title("🚀 並列特許PDF構造化ツール")
-st.markdown("**AI並列処理による高速特許データ抽出システム**")
-
-if not EXTRACTOR_AVAILABLE:
-    st.error("❌ 抽出エンジンが利用できません。")
-    st.info("💡 **解決方法**: patent_extractor.py ファイルをアップロードするか、リポジトリに追加してください。")
-    
-    # ファイルアップローダーを追加
-    st.subheader("📁 patent_extractor.py をアップロード")
-    uploaded_extractor = st.file_uploader("patent_extractor.py", type=["py"])
-    if uploaded_extractor:
+# ストリーミング処理用関数
+def stream_processing_thread(pdf_path, model_name, api_key, schema, prompt, temperature, max_tokens, output_queue):
+    """別スレッドでストリーミング処理を実行"""
+    try:
+        extractor = StreamingPatentExtractor(
+            model_name=model_name,
+            api_key=api_key,
+            json_schema=schema,
+            user_prompt=prompt,
+            temperature=temperature,
+            max_tokens=max_tokens
+        )
+        
+        def stream_callback(chunk):
+            output_queue.put(('chunk', chunk))
+        
+        full_output = ""
+        for chunk in extractor.process_patent_pdf_stream(pdf_path, stream_callback):
+            full_output += chunk
+        
+        # 最終結果をJSONとして解析
         try:
-            # ファイルを保存
-            with open("patent_extractor.py", "wb") as f:
-                f.write(uploaded_extractor.getbuffer())
-            st.success("✅ patent_extractor.py をアップロードしました。ページを再読み込みしてください。")
-            st.button("🔄 ページ再読み込み", on_click=st.rerun)
+            final_json = extractor._extract_json_from_text(full_output)
+            output_queue.put(('complete', final_json))
         except Exception as e:
-            st.error(f"❌ ファイル保存エラー: {e}")
-    
-    st.stop()
+            output_queue.put(('complete', {"error": f"JSON解析エラー: {str(e)}", "raw_output": full_output}))
+            
+    except Exception as e:
+        output_queue.put(('error', str(e)))
 
-# サイドバー設定
+# リセット関数
+def reset_session_state():
+    """セッション状態をリセット"""
+    st.session_state.streaming_output = ""
+    st.session_state.is_processing = False
+    st.session_state.processing_complete = False
+    st.session_state.final_result = None
+    st.session_state.chunk_count = 0
+    st.session_state.start_time = None
+
+# タイトルと説明
+st.markdown('<div class="title-area">', unsafe_allow_html=True)
+st.title("🧩 特許PDF構造化ツール（ストリーミング対応）")
+st.markdown("""
+特許PDFからマルチモーダル生成AIを使用して構造化JSONを**リアルタイムストリーミング**で抽出します。
+Gemini、GPT、Claudeなどの最新モデルを利用して特許データを解析できます。
+""")
+st.markdown('</div>', unsafe_allow_html=True)
+
+# サイドバー - 設定エリア
 with st.sidebar:
-    st.header("⚙️ 処理設定")
+    st.header("⚙️ 設定")
     
-    # 並列処理設定
-    st.subheader("🚀 並列処理")
-    max_workers = st.slider("並列ワーカー数", 1, 32, 8, help="同時処理するフィールド数")
-    
-    processing_mode = st.radio(
-        "処理モード",
-        ["🔍 ドメイン検出のみ", "⚡ 完全並列抽出"],
-        help="ドメイン検出のみは高速、完全抽出は詳細データを取得"
+    # APIプロバイダーとモデル選択
+    provider = st.selectbox(
+        "AIプロバイダー（Google Geminiを推奨）",
+        options=list(DEFAULT_MODEL_OPTIONS.keys())
     )
     
-    # AIモデル設定
-    st.subheader("🤖 AIモデル")
-    provider = st.selectbox("プロバイダー", list(DEFAULT_MODEL_OPTIONS.keys()))
+    # APIキー入力
     api_key = st.text_input(
-        f"{provider} APIキー", 
-        value=get_api_key_from_env(provider), 
+        f"{provider} APIキー",
+        value=get_api_key_from_env(provider),
         type="password",
-        help="環境変数からの自動取得もサポート"
+        help="APIキーを入力してください。環境変数から自動的に取得することも可能です。"
     )
     
-    # モデル取得と選択
-    if api_key:
-        with st.spinner("🔄 利用可能なモデルを取得中..."):
+    # モデル選択方法のラジオボタン
+    model_input_type = st.radio(
+        "モデル選択方法",
+        options=["利用可能なモデルから選択", "カスタムモデル名を入力"],
+        horizontal=True
+    )
+    
+    if model_input_type == "利用可能なモデルから選択":
+        with st.spinner("利用可能なモデルを取得中..."):
             available_models = get_models_with_cache(provider, api_key)
         
         if available_models:
-            st.success(f"✅ {len(available_models)}個のモデルを取得")
-            model_name = st.selectbox("モデル", available_models)
+            if api_key:
+                st.info(f"✅ {len(available_models)}個の利用可能なモデルを取得しました")
+            else:
+                st.info(f"ℹ️ デフォルトモデル一覧を表示中（APIキーを入力すると最新一覧を取得）")
             
-            # モデル更新ボタン
-            if st.button("🔄 モデル一覧を更新"):
+            model_name = st.selectbox(
+                "モデル",
+                options=available_models,
+                help="APIから取得した利用可能なモデル一覧です"
+            )
+            
+            if st.button("🔄 モデル一覧を更新", help="最新のモデル一覧を再取得します"):
                 st.cache_data.clear()
                 st.rerun()
+                
         else:
-            st.error("❌ モデル取得に失敗しました")
+            st.error("利用可能なモデルを取得できませんでした。APIキーを確認してください。")
             model_name = ""
+            
     else:
-        st.warning("⚠️ APIキーを入力してください")
-        model_name = ""
+        model_placeholder = get_model_prefix(provider) + "model-name"
+        model_name = st.text_input(
+            "モデル名",
+            placeholder=model_placeholder,
+            help=f"{provider}の任意のモデル名を入力してください（例: {model_placeholder}）"
+        )
+        
+        if model_name and not is_valid_model_name(model_name, provider):
+            st.warning(f"⚠️ 入力されたモデル名「{model_name}」は{provider}のモデルではない可能性があります。")
+        
+        with st.expander("💡 モデル名のヒント"):
+            if provider == "Google Gemini":
+                st.markdown("""
+                **Google Geminiモデル例:**
+                - `gemini-1.5-pro` - 高性能モデル
+                - `gemini-1.5-flash` - 高速モデル
+                - `gemini-2.0-flash-exp` - 実験的モデル
+                """)
+            elif provider == "OpenAI":
+                st.markdown("""
+                **OpenAIモデル例:**
+                - `gpt-4o` - 最新のマルチモーダルモデル
+                - `gpt-4-vision-preview` - ビジョン対応モデル
+                - `gpt-4-turbo` - 高速モデル
+                """)
+            elif provider == "Anthropic":
+                st.markdown("""
+                **Anthropicモデル例:**
+                - `claude-3-opus-20240229` - 最高性能モデル
+                - `claude-3-sonnet-20240229` - バランス型モデル
+                - `claude-3-haiku-20240307` - 高速モデル
+                - `claude-3-5-sonnet-20241022` - 最新Sonnetモデル
+                """)
     
-    # スキーマ設定
-    st.subheader("📋 JSONスキーマ")
-    schema_type = st.radio("スキーマ設定", ["🎯 デフォルト", "📁 ファイル", "✏️ 直接入力"])
+    if model_input_type == "カスタムモデル名を入力" and not model_name:
+        st.error("モデル名を入力してください")
+    
+    if model_name:
+        st.success(f"選択されたモデル: **{model_name}**")
+    
+    # スキーマタイプの選択
+    schema_type = st.radio(
+        "JSONスキーマ",
+        options=["デフォルトスキーマを使用", "カスタムスキーマをアップロード", "スキーマを直接入力"],
+        index=0
+    )
     
     schema = {}
-    if schema_type == "📁 ファイル":
-        uploaded_schema = st.file_uploader("スキーマファイル", type=["json"])
+    if schema_type == "カスタムスキーマをアップロード":
+        uploaded_schema = st.file_uploader(
+            "JSONスキーマファイル",
+            type=["json"],
+            help="JSONスキーマファイルをアップロードしてください"
+        )
         if uploaded_schema:
-            schema = load_schema(file_content=uploaded_schema.getvalue().decode("utf-8"))
-    elif schema_type == "✏️ 直接入力":
-        schema_text = st.text_area("JSONスキーマ", height=150, placeholder='{"type": "object", "properties": {...}}')
+            schema_content = uploaded_schema.getvalue().decode("utf-8")
+            schema = load_schema(file_content=schema_content)
+            if schema:
+                st.success("スキーマを読み込みました")
+    
+    elif schema_type == "スキーマを直接入力":
+        schema_text = st.text_area(
+            "JSONスキーマを入力",
+            height=200,
+            help="JSONスキーマを直接入力してください"
+        )
         if schema_text:
             try:
                 schema = json.loads(schema_text)
-                st.success("✅ スキーマ形式OK")
-            except:
-                st.error("❌ JSON形式エラー")
+                st.success("スキーマの形式が正しいです")
+            except json.JSONDecodeError:
+                st.error("JSONの形式が正しくありません")
+    
     else:
-        # デフォルトスキーマ
-        default_paths = ["default_schema.json", "schema.json", "./default_schema.json"]
-        for path in default_paths:
-            if os.path.exists(path):
-                schema = load_schema(file_path=path)
-                break
-        if not schema:
-            st.warning("⚠️ デフォルトスキーマが見つかりません")
+        default_schema_path = "default_schema.json"
+        if os.path.exists(default_schema_path):
+            schema = load_schema(file_path=default_schema_path)
+            st.success("デフォルトスキーマを読み込みました")
+        else:
+            st.info("デフォルトスキーマが見つからないため、空のスキーマを使用します")
     
     # 詳細設定
-    with st.expander("⚙️ 詳細設定"):
-        custom_prompt = st.text_area("カスタムプロンプト", height=80, placeholder="追加の抽出指示...")
-        temperature = st.slider("Temperature", 0.0, 1.0, 0.1, 0.05, help="0.0=決定的, 1.0=創造的")
-        max_tokens = st.selectbox("最大トークン数", [2048, 4096, 8192, 16384, 32768], index=2)
+    with st.expander("詳細設定", expanded=False):
+        custom_prompt = st.text_area(
+            "カスタムプロンプト",
+            value="",
+            height=100,
+            help="生成AIへのカスタム指示を入力できます"
+        )
+        
+        temperature = st.slider(
+            "Temperature",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.1,
+            step=0.05,
+            help="高い値: より多様な出力、低い値: より確定的な出力"
+        )
+        
+        max_tokens = st.number_input(
+            "最大トークン数",
+            min_value=1024,
+            max_value=65535,
+            value=32768,
+            step=1024,
+            help="生成AIが出力できる最大トークン数"
+        )
+    
+    # スキーマの詳細表示
+    if schema and st.checkbox("スキーマ詳細を表示"):
+        st.json(schema)
+    
+    # リセットボタン
+    if st.button("🔄 リセット", help="処理状態をリセットします"):
+        reset_session_state()
+        st.rerun()
 
-# メイン処理エリア
+# メインエリア - 2列レイアウト
 col1, col2 = st.columns([1, 1])
 
 with col1:
-    st.header("📥 入力")
+    st.header("📤 入力")
     
+    # PDF アップロード
     uploaded_pdf = st.file_uploader(
-        "特許PDFファイル", 
+        "特許PDFをアップロード",
         type=["pdf"],
-        help="日本語・英語の特許PDFに対応"
+        help="処理する特許PDFファイルをアップロードしてください"
     )
     
     if uploaded_pdf:
-        st.success(f"✅ ファイル: {uploaded_pdf.name} ({uploaded_pdf.size:,} bytes)")
+        st.success(f"ファイル名: {uploaded_pdf.name}")
         
-        # ファイル情報
-        with st.expander("📄 ファイル詳細"):
-            st.write(f"**ファイル名**: {uploaded_pdf.name}")
-            st.write(f"**サイズ**: {uploaded_pdf.size:,} bytes")
-            st.write(f"**タイプ**: {uploaded_pdf.type}")
+        # PDFの表示
+        with st.expander("PDFプレビュー", expanded=False):
+            try:
+                import base64
+                pdf_base64 = base64.b64encode(uploaded_pdf.getvalue()).decode('utf-8')
+                pdf_display = f'<iframe src="data:application/pdf;base64,{pdf_base64}" width="100%" height="500" type="application/pdf"></iframe>'
+                st.markdown(pdf_display, unsafe_allow_html=True)
+            except:
+                st.info("PDFプレビューを表示できませんでした")
     
     # 処理ボタン
-    process_enabled = uploaded_pdf and api_key and model_name
-    
-    if processing_mode == "🔍 ドメイン検出のみ":
-        process_button = st.button(
-            "🔍 ドメイン検出実行",
-            disabled=not process_enabled,
-            use_container_width=True,
-            help="高速でドメインのみ検出"
-        )
-    else:
-        process_button = st.button(
-            f"⚡ 並列抽出開始 ({max_workers}workers)",
-            disabled=not process_enabled,
-            use_container_width=True,
-            help="完全な並列データ抽出"
-        )
-    
-    if not process_enabled:
-        missing = []
-        if not uploaded_pdf: missing.append("PDFファイル")
-        if not api_key: missing.append("APIキー")
-        if not model_name: missing.append("モデル選択")
-        st.warning(f"⚠️ 不足: {', '.join(missing)}")
+    process_button = st.button(
+        "🚀 ストリーミング処理開始",
+        disabled=not (uploaded_pdf and api_key and model_name) or st.session_state.is_processing,
+        help="特許PDFをストリーミング処理して構造化JSONを生成します"
+    )
 
 with col2:
-    st.header("📤 出力")
+    st.header("📥 ストリーミング出力")
     
-    if process_button and uploaded_pdf and api_key and model_name:
-        pdf_path = save_upload_file(uploaded_pdf)
+    # 処理状況の表示
+    if st.session_state.is_processing or st.session_state.processing_complete:
+        # 統計情報
+        col_stats1, col_stats2, col_stats3 = st.columns(3)
+        with col_stats1:
+            elapsed_time = (time.time() - st.session_state.start_time) if st.session_state.start_time else 0
+            st.markdown(f'<div class="stat-box blue-stat"><h4>{elapsed_time:.1f}s</h4>経過時間</div>', unsafe_allow_html=True)
+        with col_stats2:
+            st.markdown(f'<div class="stat-box green-stat"><h4>{st.session_state.chunk_count}</h4>受信チャンク</div>', unsafe_allow_html=True)
+        with col_stats3:
+            status_text = "完了" if st.session_state.processing_complete else "処理中"
+            status_color = "green-stat" if st.session_state.processing_complete else "orange-stat"
+            st.markdown(f'<div class="stat-box {status_color}"><h4>{status_text}</h4>ステータス</div>', unsafe_allow_html=True)
+    
+    # ストリーミング出力エリア
+    if st.session_state.is_processing or st.session_state.streaming_output:
+        st.markdown("### リアルタイムストリーミング出力")
+        streaming_container = st.empty()
+        streaming_container.markdown(f'<div class="streaming-output">{st.session_state.streaming_output}</div>', unsafe_allow_html=True)
+    
+    # 最終結果の表示
+    if st.session_state.processing_complete and st.session_state.final_result:
+        st.markdown("### 最終JSON結果")
+        st.json(st.session_state.final_result)
         
-        if pdf_path:
-            # プログレスバー
-            progress_bar = st.progress(0)
-            status_text = st.empty()
+        # ダウンロードボタン
+        if uploaded_pdf:
+            json_str = json.dumps(st.session_state.final_result, ensure_ascii=False, indent=2)
+            output_filename = f"{Path(uploaded_pdf.name).stem}_streaming.json"
             
-            try:
-                if processing_mode == "🔍 ドメイン検出のみ":
-                    # ドメイン検出のみ
-                    status_text.text("🔍 ドメイン検出中...")
-                    progress_bar.progress(50)
-                    
-                    result = detect_domain_only(pdf_path, model_name, api_key)
-                    progress_bar.progress(100)
-                    
-                    if "error" in result:
-                        st.error(f"❌ 検出エラー: {result['error']}")
-                    else:
-                        st.success("✅ ドメイン検出完了！")
-                        display_domain_info(result)
-                        
-                        # 結果表示
-                        st.json(result)
-                        
-                        # ダウンロード
-                        json_str = json.dumps(result, indent=2, ensure_ascii=False)
-                        st.download_button(
-                            "📥 ドメイン情報ダウンロード",
-                            data=json_str.encode("utf-8"),
-                            file_name=f"{Path(uploaded_pdf.name).stem}_domain.json",
-                            mime="application/json",
-                            use_container_width=True
-                        )
-                
-                else:
-                    # 完全並列抽出
-                    status_text.text(f"⚡ {model_name}で並列処理中...")
-                    progress_bar.progress(25)
-                    
-                    start_time = time.time()
-                    result = process_pdf_parallel(
-                        pdf_path=pdf_path,
-                        model_name=model_name,
-                        api_key=api_key,
-                        schema=schema,
-                        prompt=custom_prompt if custom_prompt else None,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        max_workers=max_workers
-                    )
-                    
-                    progress_bar.progress(100)
-                    
-                    if "error" in result:
-                        st.error(f"❌ 処理エラー: {result['error']}")
-                    else:
-                        st.success("✅ 並列処理完了！")
-                        
-                        # ドメイン情報表示
-                        if "_processing_metadata" in result:
-                            domain = result["_processing_metadata"].get("domain_detected")
-                            if domain:
-                                display_domain_info({"primary_domain": domain})
-                        
-                        # パフォーマンス指標
-                        if "_processing_metadata" in result:
-                            display_performance_metrics(result["_processing_metadata"])
-                        
-                        # 抽出結果サマリー
-                        display_extraction_summary(result)
-                        
-                        # スキーマ検証
-                        if schema:
-                            display_validation_results(result, schema)
-                        
-                        # 結果表示
-                        clean_result = {k: v for k, v in result.items() if not k.startswith('_')}
-                        
-                        with st.expander("📋 完全な抽出結果"):
-                            st.json(clean_result)
-                        
-                        # ダウンロードボタン
-                        col_dl1, col_dl2 = st.columns(2)
-                        
-                        with col_dl1:
-                            json_str = json.dumps(clean_result, indent=2, ensure_ascii=False)
-                            output_filename = f"{Path(uploaded_pdf.name).stem}_extracted.json"
-                            
-                            st.download_button(
-                                "📥 抽出結果ダウンロード",
-                                data=json_str.encode("utf-8"),
-                                file_name=output_filename,
-                                mime="application/json",
-                                use_container_width=True
-                            )
-                        
-                        with col_dl2:
-                            # メタデータ付き完全版
-                            full_json_str = json.dumps(result, indent=2, ensure_ascii=False)
-                            metadata_filename = f"{Path(uploaded_pdf.name).stem}_full.json"
-                            
-                            st.download_button(
-                                "📊 メタデータ付きダウンロード",
-                                data=full_json_str.encode("utf-8"),
-                                file_name=metadata_filename,
-                                mime="application/json",
-                                use_container_width=True
-                            )
-                
-            finally:
-                # 一時ファイル削除
-                try:
-                    os.remove(pdf_path)
-                except:
-                    pass
-                
-                status_text.empty()
-                progress_bar.empty()
+            st.download_button(
+                label="📥 JSONをダウンロード",
+                data=json_str.encode("utf-8"),
+                file_name=output_filename,
+                mime="application/json",
+                help="抽出された構造化データをJSONファイルとしてダウンロードします"
+            )
     
-    else:
-        # 待機状態の情報表示
-        st.info("📋 PDFをアップロードして処理を開始してください")
+    # プレースホルダー
+    if not st.session_state.is_processing and not st.session_state.processing_complete:
+        st.info("PDFをアップロードして「ストリーミング処理開始」ボタンをクリックすると、ここにリアルタイムで抽出結果が表示されます")
         
-        # 使用例表示
-        with st.expander("💡 出力例"):
-            if processing_mode == "🔍 ドメイン検出のみ":
-                example = {
-                    "primary_domain": "chemical",
-                    "structural_elements": ["chemical_structures", "tables", "figures"],
-                    "extraction_priorities": ["ChemicalStructureLibrary", "Claims", "Description"],
-                    "complexity_level": "high"
+        with st.expander("ストリーミング出力例"):
+            st.markdown("""
+            ```json
+            {
+              "publicationIdentifier": "WO2020123456A1",
+              "FrontPage": {
+                "title": "AI駆動特許データ抽出システム",
+                "PublicationData": {
+                  "PublicationNumber": "WO2020123456A1",
+                  "PublicationDate": "2020-06-15"
                 }
-            else:
-                example = {
-                    "publicationIdentifier": "WO2024123456A1",
-                    "FrontPage": {
-                        "PublicationData": {"PublicationNumber": "WO2024123456A1"},
-                        "Abstract": {"Paragraph": [{"content": "AI特許抽出システム..."}]}
-                    },
-                    "Claims": {"Claim": [{"id": "1", "Text": {"content": "AIを使用する方法..."}}]},
-                    "ChemicalStructureLibrary": {"Compound": []}
-                }
-            st.json(example)
+              }
+            }
+            ```
+            
+            **ストリーミングの特徴:**
+            - ⚡ リアルタイム出力表示
+            - 🔄 途中経過が見える
+            - ⏱️ 即座に結果確認
+            - 🛑 途中停止可能
+            """)
 
-# フッター情報
+# 処理開始
+if process_button and uploaded_pdf and api_key and model_name and not st.session_state.is_processing:
+    # セッション状態をリセット
+    reset_session_state()
+    
+    # 処理状態を開始に設定
+    st.session_state.is_processing = True
+    st.session_state.start_time = time.time()
+    
+    # PDFを一時ファイルとして保存
+    pdf_path = save_upload_file(uploaded_pdf)
+    
+    if pdf_path:
+        # キューを作成してストリーミング処理を開始
+        output_queue = queue.Queue()
+        
+        # バックグラウンドスレッドで処理開始
+        thread = threading.Thread(
+            target=stream_processing_thread,
+            args=(
+                pdf_path,
+                model_name,
+                api_key,
+                schema,
+                custom_prompt if custom_prompt else None,
+                temperature,
+                max_tokens,
+                output_queue
+            )
+        )
+        thread.daemon = True
+        thread.start()
+        
+        # ストリーミング出力の監視
+        while st.session_state.is_processing:
+            try:
+                # ノンブロッキングでキューからデータを取得
+                msg_type, data = output_queue.get(timeout=0.1)
+                
+                if msg_type == 'chunk':
+                    st.session_state.streaming_output += data
+                    st.session_state.chunk_count += 1
+                    
+                elif msg_type == 'complete':
+                    st.session_state.final_result = data
+                    st.session_state.processing_complete = True
+                    st.session_state.is_processing = False
+                    
+                elif msg_type == 'error':
+                    st.error(f"処理エラー: {data}")
+                    st.session_state.is_processing = False
+                
+                # UIを更新
+                st.rerun()
+                
+            except queue.Empty:
+                # タイムアウト - 処理継続中
+                time.sleep(0.1)
+                continue
+            except Exception as e:
+                st.error(f"ストリーミングエラー: {str(e)}")
+                st.session_state.is_processing = False
+                break
+        
+        # 一時ファイルの削除
+        try:
+            os.remove(pdf_path)
+        except:
+            pass
+
+# 自動リフレッシュ（処理中のみ）
+if st.session_state.is_processing:
+    time.sleep(1)
+    st.rerun()
+
+# フッター
 st.markdown("---")
-col_info1, col_info2, col_info3 = st.columns(3)
-
-with col_info1:
-    st.markdown("**🚀 機能**")
-    st.markdown("• 並列処理による高速抽出")
-    st.markdown("• ドメイン自動検出")
-    st.markdown("• スキーマ準拠")
-
-with col_info2:
-    st.markdown("**📊 対応ドメイン**") 
-    st.markdown("• 化学・医薬")
-    st.markdown("• バイオテクノロジー")
-    st.markdown("• 機械・電子")
-
-with col_info3:
-    st.markdown("**⚡ パフォーマンス**")
-    st.markdown("• 最大32並列ワーカー")
-    st.markdown("• リアルタイム進捗表示")
-    st.markdown("• 詳細統計レポート")
-
-st.markdown(
-    "<div style='text-align: center; color: #666; margin-top: 20px;'>"
-    "🔬 並列特許PDF構造化ツール - AI駆動高速データ抽出システム"
-    "</div>", 
-    unsafe_allow_html=True
-)
+st.markdown("""
+<div style="text-align: center; color: #666;">
+    特許PDF構造化ツール（ストリーミング対応） - マルチモーダル生成AIを使用してリアルタイムで特許文書から構造化情報を抽出<br>
+    <small>Powered by StreamingPatentExtractor library Copyright (c) 2025 Pyxist Co.,Ltd</small>
+</div>
+""", unsafe_allow_html=True)
