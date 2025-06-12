@@ -427,8 +427,7 @@ class PatentExtractor:
         
         schema_description = describe_schema(schema)
         
-        return f"""
-Extract the {field_name} section and return it in the following JSON structure:
+        return f"""Extract the {field_name} section and return it in the following JSON structure:
 
 {field_name}: {schema_description}
 
